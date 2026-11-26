@@ -70,7 +70,7 @@ def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
         SELECT id, case_number, occurred_at, iucr, primary_type, description,
                arrest, domestic, beat, district, ward, community_area,
                x_coordinate, y_coordinate, latitude, longitude,
-               source_updated_at, run_id AS silver_run_id,
+               source_updated_at, bronze_id, run_id AS silver_run_id,
                to_char(occurred_at AT TIME ZONE 'America/Chicago', 'YYYYMMDD')::integer AS date_key,
                CASE WHEN beat IS NOT NULL THEN 'beat:' || beat
                     WHEN district IS NOT NULL THEN 'district:' || district
@@ -169,7 +169,7 @@ def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
         SELECT s.id AS crime_id, s.date_key, t.crime_type_key, l.location_key,
                s.occurred_at, s.case_number, s.arrest, s.domestic,
                s.x_coordinate, s.y_coordinate, s.latitude, s.longitude,
-               s.source_updated_at, s.silver_run_id
+               s.source_updated_at, s.bronze_id, s.silver_run_id
         FROM gold_source s
         JOIN gold.dim_crime_type t ON t.iucr = s.iucr
         JOIN gold.dim_location l
@@ -188,10 +188,10 @@ def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
         INSERT INTO gold.fact_crimes
             (crime_id, date_key, crime_type_key, location_key, occurred_at,
              case_number, arrest, domestic, x_coordinate, y_coordinate,
-             latitude, longitude, source_updated_at, silver_run_id, run_id)
+             latitude, longitude, source_updated_at, bronze_id, silver_run_id, run_id)
         SELECT crime_id, date_key, crime_type_key, location_key, occurred_at,
                case_number, arrest, domestic, x_coordinate, y_coordinate,
-               latitude, longitude, source_updated_at, silver_run_id, %s
+               latitude, longitude, source_updated_at, bronze_id, silver_run_id, %s
         FROM gold_fact_stage
         ON CONFLICT (crime_id) DO UPDATE SET
             date_key = EXCLUDED.date_key,
@@ -206,10 +206,12 @@ def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
             latitude = EXCLUDED.latitude,
             longitude = EXCLUDED.longitude,
             source_updated_at = EXCLUDED.source_updated_at,
+            bronze_id = EXCLUDED.bronze_id,
             silver_run_id = EXCLUDED.silver_run_id,
             run_id = EXCLUDED.run_id,
             loaded_at = now()
-        WHERE gold.fact_crimes.source_updated_at < EXCLUDED.source_updated_at
+        WHERE (gold.fact_crimes.source_updated_at, gold.fact_crimes.bronze_id)
+              < (EXCLUDED.source_updated_at, EXCLUDED.bronze_id)
     """, (run_id,)).rowcount
     stats.facts_inserted = staged_facts - before
     stats.facts_updated = inserted_facts - stats.facts_inserted
