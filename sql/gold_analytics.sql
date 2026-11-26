@@ -24,7 +24,7 @@ WITH bounds AS (
 calendar AS (
     SELECT day::date AS full_date
     FROM bounds,
-         generate_series(first_day, last_day, interval '1 day') AS days(day)
+         generate_series(first_day::timestamp, last_day::timestamp, interval '1 day') AS days(day)
 ),
 daily AS (
     SELECT c.full_date, count(f.crime_id) AS crime_count
