@@ -155,7 +155,12 @@ def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
             (location_nk, beat, district, ward, community_area, attribute_hash,
              valid_from, valid_to, is_current)
         SELECT s.location_nk, s.beat, s.district, s.ward, s.community_area,
-               s.attribute_hash, s.valid_from, 'infinity', true
+               s.attribute_hash,
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM gold.dim_location history
+                   WHERE history.location_nk = s.location_nk
+               ) THEN s.valid_from ELSE '-infinity'::timestamptz END,
+               'infinity', true
         FROM gold_location_latest s
         WHERE NOT EXISTS (
             SELECT 1 FROM gold.dim_location d
@@ -180,6 +185,7 @@ def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
     """)
     conn.execute("CREATE UNIQUE INDEX gold_fact_stage_pk ON gold_fact_stage(crime_id)")
     conn.execute("ANALYZE gold_fact_stage")
+    staged_facts = conn.execute("SELECT count(*) FROM gold_fact_stage").fetchone()[0]
     before = conn.execute("""
         SELECT count(*) FROM gold_fact_stage s
         JOIN gold.fact_crimes f USING (crime_id)
@@ -210,9 +216,9 @@ def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
             loaded_at = now()
         WHERE gold.fact_crimes.source_updated_at < EXCLUDED.source_updated_at
     """).rowcount
-    stats.facts_inserted = stats.source_rows - before
+    stats.facts_inserted = staged_facts - before
     stats.facts_updated = inserted_facts - stats.facts_inserted
-    stats.facts_unchanged = stats.source_rows - inserted_facts
+    stats.facts_unchanged = staged_facts - inserted_facts
     return stats
 
 
