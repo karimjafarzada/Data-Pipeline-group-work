@@ -14,11 +14,12 @@ Run it with: ``python -m pipeline.migrate``
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 
 import psycopg
+
+from pipeline.db import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -80,25 +81,9 @@ def apply_migrations(conn: psycopg.Connection, directory: Path = MIGRATIONS_DIR)
         conn.execute("SELECT pg_advisory_unlock(%s)", (MIGRATION_LOCK_ID,))
 
 
-def _connection_settings_from_env() -> dict[str, str]:
-    # TODO: switch to get_connection() from pipeline/db.py (Student 3) once it exists.
-    missing = [n for n in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER") if not os.environ.get(n)]
-    if missing:
-        raise SystemExit(f"Missing environment variables: {', '.join(missing)}")
-    settings = {
-        "host": os.environ["POSTGRES_HOST"],
-        "port": os.environ.get("POSTGRES_PORT", "5432"),
-        "dbname": os.environ["POSTGRES_DB"],
-        "user": os.environ["POSTGRES_USER"],
-    }
-    if os.environ.get("POSTGRES_PASSWORD"):
-        settings["password"] = os.environ["POSTGRES_PASSWORD"]
-    return settings
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    with psycopg.connect(**_connection_settings_from_env()) as conn:
+    with get_connection() as conn:
         applied = apply_migrations(conn)
     if not applied:
         logger.info("Database is already up to date")
