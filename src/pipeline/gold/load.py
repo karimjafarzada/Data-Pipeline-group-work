@@ -194,10 +194,10 @@ def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
         INSERT INTO gold.fact_crimes
             (crime_id, date_key, crime_type_key, location_key, occurred_at,
              case_number, arrest, domestic, x_coordinate, y_coordinate,
-             latitude, longitude, source_updated_at, silver_run_id)
+             latitude, longitude, source_updated_at, silver_run_id, run_id)
         SELECT crime_id, date_key, crime_type_key, location_key, occurred_at,
                case_number, arrest, domestic, x_coordinate, y_coordinate,
-               latitude, longitude, source_updated_at, silver_run_id
+               latitude, longitude, source_updated_at, silver_run_id, %s
         FROM gold_fact_stage
         ON CONFLICT (crime_id) DO UPDATE SET
             date_key = EXCLUDED.date_key,
@@ -213,9 +213,10 @@ def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
             longitude = EXCLUDED.longitude,
             source_updated_at = EXCLUDED.source_updated_at,
             silver_run_id = EXCLUDED.silver_run_id,
+            run_id = EXCLUDED.run_id,
             loaded_at = now()
         WHERE gold.fact_crimes.source_updated_at < EXCLUDED.source_updated_at
-    """).rowcount
+    """, (run_id,)).rowcount
     stats.facts_inserted = staged_facts - before
     stats.facts_updated = inserted_facts - stats.facts_inserted
     stats.facts_unchanged = staged_facts - inserted_facts
