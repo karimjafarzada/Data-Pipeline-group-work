@@ -212,7 +212,11 @@ def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
             loaded_at = now()
         WHERE (gold.fact_crimes.source_updated_at, gold.fact_crimes.bronze_id)
               < (EXCLUDED.source_updated_at, EXCLUDED.bronze_id)
-           OR gold.fact_crimes.location_key IS DISTINCT FROM EXCLUDED.location_key
+           OR (
+                (gold.fact_crimes.source_updated_at, gold.fact_crimes.bronze_id)
+                = (EXCLUDED.source_updated_at, EXCLUDED.bronze_id)
+                AND gold.fact_crimes.location_key IS DISTINCT FROM EXCLUDED.location_key
+           )
     """, (run_id,)).rowcount
     stats.facts_inserted = staged_facts - before
     stats.facts_updated = inserted_facts - stats.facts_inserted
