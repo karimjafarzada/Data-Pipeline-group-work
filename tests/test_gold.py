@@ -72,12 +72,12 @@ def test_location_change_expires_previous_scd2_version(db, make_run):
     stats = load_gold(make_run(), conn=db)
 
     versions = db.execute("""
-        SELECT ward, valid_from, valid_to, is_current
-        FROM gold.dim_location ORDER BY valid_from
+        SELECT ward, is_current
+        FROM gold.dim_location ORDER BY location_key
     """).fetchall()
     assert len(versions) == 2
-    assert versions[0][0] == 18 and versions[0][3] is False
-    assert versions[1][0] == 19 and versions[1][3] is True
+    assert versions[0] == (18, False)
+    assert versions[1] == (19, True)
     assert stats.locations_expired == 1
     assert db.execute("SELECT location_key FROM gold.fact_crimes").fetchone()[0] == db.execute(
         "SELECT location_key FROM gold.dim_location WHERE is_current"
