@@ -10,8 +10,7 @@ Gold is a dimensional warehouse built exclusively from `silver.crimes`.
 - `gold.dim_location`: SCD Type 2 history for beat/district/ward/community-area attributes.
   Beat is the natural key when present; otherwise district, then ward/community area.
 
-Location versions use the Silver row's `source_updated_at` as the observation/effective timestamp.
-The fact joins the version valid at that timestamp. This captures changes observed between
+For the first observed snapshot, a location version starts at `-infinity` because Silver is a current-state table and its crime `source_updated_at` values are not the effective start date of a whole beat. Subsequent attribute changes use the newest observed Silver `source_updated_at` as the SCD2 boundary. Each fact joins the location version valid at its own Silver `source_updated_at`. This captures changes observed between
 Gold loads; it cannot reconstruct versions that Silver overwrote before Gold first observed them.
 Crime type descriptions are Type 1 because the Silver contract contains no effective-dated IUCR
 reference catalogue.
