@@ -8,13 +8,21 @@ from datetime import date, datetime
 from pathlib import Path
 
 from pipeline import __main__ as cli
-from pipeline.db import get_connection
 from pipeline.ingestion.bronze import CHICAGO
 from pipeline.ingestion.ingest import ingest
-from pipeline.runs import RunCounts, finish_run, start_run
 
 START = date(2026, 11, 1)
 END = date(2026, 11, 30)
+
+
+
+def crime_record(record_id):
+    return {
+        "id": record_id, "case_number": f"DEMO-{record_id}",
+        "date": "2026-11-01T00:00:00.000", "updated_on": "2026-11-01T00:15:00.000",
+        "iucr": "1320", "primary_type": "CRIMINAL DAMAGE",
+        "arrest": False, "domestic": False, "year": "2026",
+    }
 
 
 class CheckpointPages:
@@ -25,13 +33,13 @@ class CheckpointPages:
         assert (start_date, end_date) == (START, END)
         if self.phase == "pause":
             assert after_id is None
-            yield [{"id": "1", "updated_on": "2026-11-01T00:00:00.000"}]
+            yield [crime_record("1")]
             print("CHECKPOINT_COMMITTED: 1", flush=True)
             time.sleep(120)
         else:
             assert after_id == 1
             print("RESUMED_FROM_CHECKPOINT: 1", flush=True)
-            yield [{"id": "2", "updated_on": "2026-11-01T00:00:00.000"}]
+            yield [crime_record("2")]
 
 
 class MalformedPage:
@@ -67,12 +75,12 @@ def main():
     if phase == "malformed":
         return prove_malformed_batch()
 
-    with get_connection() as conn:
-        conn.autocommit = True
-        run_id = start_run("backfill", START, END, conn=conn)
-        stats = ingest(run_id, "backfill", START, END, conn=conn, client=CheckpointPages(phase))
-        finish_run(run_id, "success", RunCounts(rows_fetched=stats.rows_fetched), conn=conn)
-    return 0
+    def ingest_fixture(run_id, mode, start, end, *, conn):
+        return ingest(run_id, mode, start, end, conn=conn, client=CheckpointPages(phase))
+
+    cli.ingest = ingest_fixture
+    cli._publication_steps = lambda: (lambda run_id: None, lambda run_id: None)
+    return cli.main(["run", "--mode", "backfill", "--start", str(START), "--end", str(END)])
 
 
 if __name__ == "__main__":

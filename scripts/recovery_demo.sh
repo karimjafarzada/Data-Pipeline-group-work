@@ -11,7 +11,15 @@ POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 export POSTGRES_USER=warehouse POSTGRES_DB=warehouse POSTGRES_HOST_PORT=5434 POSTGRES_PORT=5434
 compose=(docker compose --project-name "$project")
 script_mount="$PWD/scripts/recovery_demo.py:/tmp/recovery_demo.py:ro"
-fixture_mount="$PWD/tests/fixtures/malformed_batch.json:/tmp/malformed_batch.json:ro"
+fixture="$PWD/tests/fixtures/malformed_batch.json"
+fixture_mount="$fixture:/tmp/malformed_batch.json:ro"
+read -r records valid invalid quarantine_rows < <(python3 -c '
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as fixture:
+    expected = json.load(fixture)["expected"]
+print(*(expected[key] for key in ("records", "valid", "invalid", "quarantine_rows")))
+' "$fixture")
 
 cleanup() {
     docker rm -f "$startup" "$worker" >/dev/null 2>&1 || true
@@ -54,7 +62,9 @@ test "$(docker wait "$worker")" = 137
     python /tmp/recovery_demo.py resume
 test "$(sql warehouse "SELECT string_agg(source_id, ',' ORDER BY source_id) FROM bronze.raw_records")" = 1,2
 test "$(sql warehouse "SELECT cursor_value FROM ops.ingestion_checkpoint")" = 2
-echo "CHECKPOINT RECOVERY: ids 1 and 2 each exist once; checkpoint is 2"
+test "$(sql warehouse "SELECT string_agg(status, ',' ORDER BY started_at) FROM ops.pipeline_runs")" = failed,success
+test "$(sql warehouse "SELECT error_message FROM ops.pipeline_runs WHERE status = 'failed'")" =     "Previous pipeline process exited before finishing"
+echo "CHECKPOINT RECOVERY: ids 1 and 2 each exist once; interrupted run failed; checkpoint is 2"
 
 sql warehouse "CREATE DATABASE malformed_demo"
 set +e
@@ -64,14 +74,14 @@ set +e
 result=$?
 set -e
 test "$result" = 2
-test "$(sql malformed_demo "SELECT status || ':' || rows_fetched || ':' || rows_valid || ':' || rows_quarantined FROM ops.pipeline_runs")" = failed:20:13:7
+test "$(sql malformed_demo "SELECT status || ':' || rows_fetched || ':' || rows_valid || ':' || rows_quarantined FROM ops.pipeline_runs")" = "failed:$records:$valid:$invalid"
 test "$(sql malformed_demo "SELECT count(*) FROM bronze.promotable_records")" = 0
-test "$(sql malformed_demo "SELECT count(*) FROM ops.quarantine")" = 8
-echo "QUALITY GATE: failed:20:13:7; 8 rule violations; 0 promotable rows"
+test "$(sql malformed_demo "SELECT count(*) FROM ops.quarantine")" = "$quarantine_rows"
+echo "QUALITY GATE: failed:$records:$valid:$invalid; $quarantine_rows rule violations; 0 promotable rows"
 
 run_id="$(sql malformed_demo "SELECT run_id FROM ops.pipeline_runs")"
 "${compose[@]}" run --rm --no-deps -e POSTGRES_DB=malformed_demo pipeline \
     python -m pipeline release --run-id "$run_id" --released-by "recovery-demo" --note "Tested release"
-test "$(sql malformed_demo "SELECT count(*) FROM bronze.promotable_records")" = 13
+test "$(sql malformed_demo "SELECT count(*) FROM bronze.promotable_records")" = "$valid"
 test "$(sql malformed_demo "SELECT released_by || ':' || release_note FROM ops.quality_gate_results")" = "recovery-demo:Tested release"
-echo "RELEASE: 13 valid rows are eligible for later promotion and audit details are saved"
+echo "RELEASE: $valid valid rows are eligible for later promotion and audit details are saved"
