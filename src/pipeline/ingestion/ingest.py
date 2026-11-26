@@ -61,8 +61,10 @@ def ingest(
     """Fetch pages from the API into bronze, continuing from the saved checkpoint.
 
     ``conn`` and ``client`` are for tests; by default they come from the environment.
-    The connection is switched to autocommit, so each page's ``conn.transaction()``
-    really commits on its own (psycopg refuses if a transaction is already open).
+    While ingesting, the connection is switched to autocommit, so each page's
+    ``conn.transaction()`` really commits on its own (psycopg refuses if a transaction
+    is already open). A passed-in connection gets its original setting back afterwards,
+    also when ingestion raises.
     """
     key = checkpoint_key(mode, DATASET_ID, start, end)  # checks mode and dates
     if start is not None and end is not None and start > end:
@@ -76,6 +78,7 @@ def ingest(
 
         conn = get_connection()
 
+    original_autocommit = conn.autocommit
     try:
         conn.autocommit = True
         with _ingestion_lock(conn, key):
@@ -83,6 +86,18 @@ def ingest(
     finally:
         if owns_conn:
             conn.close()
+        else:
+            _restore_autocommit(conn, original_autocommit)
+
+
+def _restore_autocommit(conn: psycopg.Connection, value: bool) -> None:
+    if conn.closed or conn.autocommit == value:
+        return
+    try:
+        conn.autocommit = value
+    except psycopg.Error:
+        # Only possible if the connection is broken; don't hide the original error.
+        logger.warning("Could not restore autocommit=%s on the connection", value)
 
 
 def _ingest_pages(

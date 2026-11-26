@@ -198,6 +198,32 @@ def test_incremental_with_empty_bronze_asks_for_a_backfill(db, make_run, client)
         ingest(make_run("incremental"), "incremental", conn=db, client=client)
 
 
+# --- the caller's connection ------------------------------------------------
+
+
+def test_autocommit_setting_is_restored_after_a_successful_run(
+    db, make_run, mocked_api, client
+):
+    run_id = make_run()
+    db.autocommit = False
+    expect_backfill_page(mocked_api, None, json=records(1, 2))
+
+    ingest(run_id, "backfill", START, END, conn=db, client=client)
+
+    assert db.autocommit is False
+    assert bronze_ids(db) == [1, 2]  # the pages were still committed
+
+
+def test_autocommit_setting_is_restored_when_ingest_raises(db, make_run, client):
+    run_id = make_run("incremental")
+    db.autocommit = False
+
+    with pytest.raises(IngestionError):
+        ingest(run_id, "incremental", conn=db, client=client)
+
+    assert db.autocommit is False
+
+
 # --- safety -----------------------------------------------------------------
 
 
