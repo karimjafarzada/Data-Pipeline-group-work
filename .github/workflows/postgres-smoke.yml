@@ -1,0 +1,33 @@
+name: PostgreSQL smoke test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    name: PostgreSQL startup and query
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate ephemeral database credentials
+        run: echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+      - name: Start PostgreSQL and run an authenticated query
+        run: |
+          docker compose config --quiet
+          docker compose up -d --wait --wait-timeout 90 db
+          result=$(docker compose exec -T db sh -ec '
+            PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1               -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -Atc "SELECT 1;"
+          ')
+          test "$result" = 1
+      - name: Show server logs on failure
+        if: failure()
+        run: docker compose logs db
+      - name: Clean up
+        if: always()
+        run: docker compose down --volumes
