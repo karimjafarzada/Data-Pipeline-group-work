@@ -8,6 +8,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from pipeline.migrate import apply_migrations, find_migrations
+from pipeline.quality.model import CrimeRecord
 
 BRONZE_INSERT = (
     "INSERT INTO bronze.raw_records (endpoint, source_id, payload, payload_hash, run_id)"
@@ -22,6 +23,7 @@ def test_migrations_create_the_tables(db):
         "ops.quarantine",
         "ops.quality_gate_results",
         "bronze.promotable_records",
+        "silver.crimes",
     ):
         exists = db.execute("SELECT to_regclass(%s) IS NOT NULL", (table,)).fetchone()[0]
         assert exists, table
@@ -99,9 +101,9 @@ def test_a_checked_row_must_name_its_validating_run(db, make_run):
 
 
 def test_rows_checked_before_the_gate_get_their_fetching_run(empty_db, tmp_path):
-    # Apply every migration except the quality gate one, add rows, then apply it.
+    # Apply the migrations older than the quality gate one, add rows, then apply the rest.
     for path in find_migrations():
-        if path.name != QUALITY_GATE_MIGRATION:
+        if path.name < QUALITY_GATE_MIGRATION:
             (tmp_path / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     apply_migrations(empty_db, tmp_path)
     run_id = uuid.uuid4()
@@ -116,7 +118,7 @@ def test_rows_checked_before_the_gate_get_their_fetching_run(empty_db, tmp_path)
             (source_id, f"hash-{source_id}", run_id, status),
         )
 
-    assert apply_migrations(empty_db) == [QUALITY_GATE_MIGRATION]
+    assert apply_migrations(empty_db)[0] == QUALITY_GATE_MIGRATION
 
     rows = empty_db.execute(
         "SELECT source_id, validated_run_id FROM bronze.raw_records ORDER BY source_id"
@@ -184,3 +186,38 @@ def test_promotable_records_are_valid_rows_of_passed_or_released_runs(db, make_r
     ).fetchall()
 
     assert [row[0] for row in rows] == ["1", "4"]
+
+
+# --- silver migration ---------------------------------------------------------------------
+
+
+def columns(db, schema, table):
+    rows = db.execute(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
+        (schema, table),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def test_silver_crimes_has_the_crime_record_fields_in_order(db):
+    # build_silver() copies CrimeRecord.model_dump() straight into these columns.
+    assert columns(db, "silver", "crimes") == [*CrimeRecord.model_fields, "bronze_id", "run_id"]
+
+
+def test_promotable_records_has_every_bronze_column(db):
+    assert columns(db, "bronze", "promotable_records") == columns(db, "bronze", "raw_records")
+
+
+def test_only_a_valid_row_can_be_handled_by_build_silver(db, make_run):
+    run_id = make_run()
+    insert_checked_row(db, run_id, "1", status="invalid")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute("UPDATE bronze.raw_records SET silver_run_id = %s", (run_id,))
+
+
+def test_unpromoted_rows_have_a_partial_index(db):
+    definition = db.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'raw_records_unpromoted_idx'"
+    ).fetchone()[0]
+    assert "WHERE ((validation_status = 'valid'::text) AND (silver_run_id IS NULL))" in definition

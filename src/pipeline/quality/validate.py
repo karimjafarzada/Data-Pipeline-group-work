@@ -55,13 +55,18 @@ def check_payload(payload: Record, now: datetime) -> list[Violation]:
     try:
         CrimeRecord.model_validate(payload)
     except ValidationError as exc:
-        reason = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-            for error in exc.errors()
-        )
+        reason = model_error_reason(exc)
         logger.error("Record passed every rule but not CrimeRecord: %s", reason)
         return [Violation(MODEL_MISMATCH, reason)]
     return []
+
+
+def model_error_reason(exc: ValidationError) -> str:
+    """A CrimeRecord error as one line, e.g. 'iucr: Input should be a valid string'."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+        for error in exc.errors()
+    )
 
 
 def validate(

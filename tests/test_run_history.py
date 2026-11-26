@@ -1,5 +1,5 @@
 from datetime import date
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -51,3 +51,53 @@ def test_run_lifecycle_uses_the_real_migration(db):
 
     with pytest.raises(ValueError, match="already finished"):
         finish_run(run_id, "success", RunCounts(), conn=db)
+
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_attempts"),
+    [
+        (psycopg.OperationalError("connection refused"), 2),
+        (psycopg.errors.InvalidPassword("invalid password"), 1),
+        (psycopg.errors.InvalidAuthorizationSpecification("login denied"), 1),
+        (psycopg.OperationalError('password authentication failed for user "bad"'), 1),
+        (psycopg.OperationalError('role "bad" does not exist'), 1),
+    ],
+)
+def test_connection_failure_is_reraised(monkeypatch, error, expected_attempts):
+    attempts = 0
+
+    def connect(**settings):
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    for name in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER"):
+        monkeypatch.setenv(name, "warehouse")
+    monkeypatch.setattr(database.psycopg, "connect", connect)
+    monkeypatch.setattr(database, "wait_fixed", lambda _: lambda state: 0)
+
+    with pytest.raises(psycopg.OperationalError) as caught:
+        database.get_connection(attempts=2)
+
+    assert caught.value is error
+    assert attempts == expected_attempts
+
+
+def test_missing_connection_environment(monkeypatch):
+    for name in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER"):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match="POSTGRES_HOST, POSTGRES_DB, POSTGRES_USER"):
+        database.get_connection()
+
+
+@pytest.mark.parametrize("mode", ["incremental", "backfill"])
+def test_start_run_rejects_invalid_dates(mode):
+    with pytest.raises(ValueError, match="(?i)date"):
+        start_run(mode, date(2025, 2, 1), date(2025, 1, 1))
+
+
+def test_unknown_run_cannot_be_finished(db):
+    with pytest.raises(ValueError, match="does not exist"):
+        finish_run(uuid4(), "failed", RunCounts(), conn=db)
