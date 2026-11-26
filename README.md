@@ -25,7 +25,7 @@ docker compose run --rm pipeline python -m pipeline run --mode backfill --start 
 docker compose run --rm pipeline python -m pipeline run --mode incremental
 ```
 
-The runner registers each attempt in `ops.pipeline_runs`, fetches and validates data, evaluates the quality threshold, and then calls the silver and gold loaders. The successfully completed layers must be present for an end-to-end success run.
+The runner registers each attempt in `ops.pipeline_runs`, fetches and validates data, evaluates the quality threshold, and then calls the silver and gold loaders. End-to-end runs require the silver and gold loaders.
 
 ```sh
 docker compose exec db psql -U warehouse -d warehouse -c "SELECT run_id, mode, status, rows_fetched, rows_valid, rows_quarantined, error_message FROM ops.pipeline_runs ORDER BY started_at DESC LIMIT 10;"
@@ -63,6 +63,8 @@ The script builds the worker, creates a disposable Compose project, and uses fix
 | PostgreSQL unavailable at startup | The migration container logs a retry while the database is down, then creates the run-history table once Postgres starts. |
 | Ingestion container killed | The worker is killed after committing page 1. A replacement worker reloads the stored cursor and inserts page 2. The script checks that IDs 1 and 2 appear once and the final cursor is 2. |
 | Malformed batch | The real CLI ingests `tests/fixtures/malformed_batch.json`. Seven of 20 records fail, so the run exits with code 2, records 13 valid and 7 quarantined rows, and stops before either loader runs. Eight quarantine entries record the separate rule violations. |
+
+The [Docker recovery run](https://github.com/karimjafarzada/Data-Pipeline-group-work/actions/runs/45811539930) passed all three scenarios. The [lint and PostgreSQL integration run](https://github.com/karimjafarzada/Data-Pipeline-group-work/actions/runs/45811634831) passed Ruff and 278 pytest tests.
 
 ## Reviews and CI
 
