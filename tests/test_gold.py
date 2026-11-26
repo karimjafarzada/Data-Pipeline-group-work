@@ -183,3 +183,28 @@ def test_same_timestamp_location_change_rekeys_unchanged_fact(db, make_run):
     assert unchanged == updated
     assert third_stats.facts_updated == third_stats.facts_inserted == 0
     assert third_stats.facts_unchanged == 2
+
+
+def test_older_silver_version_cannot_overwrite_fact_via_location_relink(db, make_run):
+    insert_silver(db, make_run(), updated="2026-11-25 12:00:00+00", ward=18)
+    load_gold(make_run(), conn=db)
+    before = db.execute("""
+        SELECT location_key, source_updated_at, bronze_id, silver_run_id, ward
+        FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE crime_id = 1001
+    """).fetchone()
+
+    # Silver now exposes an older source timestamp with changed location data.
+    insert_silver(db, make_run(), updated="2026-11-24 12:00:00+00", ward=19)
+    stats = load_gold(make_run(), conn=db)
+    after = db.execute("""
+        SELECT location_key, source_updated_at, bronze_id, silver_run_id, ward
+        FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE crime_id = 1001
+    """).fetchone()
+
+    assert after == before
+    assert stats.facts_updated == 0
+    assert stats.facts_unchanged == 1
