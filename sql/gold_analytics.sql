@@ -22,9 +22,9 @@ WITH bounds AS (
     FROM gold.dim_date
 ),
 calendar AS (
-    SELECT generated_day::date AS full_date
+    SELECT day::date AS full_date
     FROM bounds,
-         generate_series(first_day, last_day, interval '1 day') AS generated_day
+         generate_series(first_day, last_day, interval '1 day') AS days(day)
 ),
 daily AS (
     SELECT c.full_date, count(f.crime_id) AS crime_count
