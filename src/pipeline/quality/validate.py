@@ -6,8 +6,12 @@ rules"). Rows are handled in batches. Each batch's quarantine rows and new statu
 are saved in ONE transaction, so a row is never marked 'invalid' without its
 quarantine rows, or the other way round.
 
+Each checked row also stores validated_run_id, the run that checked it, so that run's
+quality gate decides whether the row may reach silver.
+
 Running validate() a second time changes nothing: no row is pending any more, so it
-checks nothing and returns zero counts. The quality gate is not part of this module yet.
+checks nothing and returns zero counts. The quality gate is a separate step that runs
+after this one (pipeline/quality/gate.py).
 """
 
 from __future__ import annotations
@@ -151,9 +155,13 @@ def _validate_batch(
                 )
             for status, ids in (("valid", valid_ids), ("invalid", invalid_ids)):
                 if ids:
+                    # validated_run_id: this run's gate decides whether the row may reach
+                    # silver (see bronze.promotable_records).
                     cur.execute(
-                        "UPDATE bronze.raw_records SET validation_status = %s WHERE id = ANY(%s)",
-                        (status, ids),
+                        "UPDATE bronze.raw_records"
+                        " SET validation_status = %s, validated_run_id = %s"
+                        " WHERE id = ANY(%s)",
+                        (status, run_id, ids),
                     )
 
     # Count only after the transaction has committed.

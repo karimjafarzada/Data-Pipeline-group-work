@@ -93,10 +93,26 @@ def test_checks_pending_rows_left_by_an_earlier_run(db, make_run, crime_record):
     assert [row[1] for row in quarantine(db)] == [this_run]
 
 
+def test_records_which_run_checked_each_row(db, make_run, crime_record):
+    fetching_run = make_run()
+    load_bronze(db, fetching_run, [variant(crime_record, 1), variant(crime_record, 2, ward="x")])
+    checking_run = make_run()
+
+    validate(checking_run, conn=db, now=NOW)
+
+    rows = db.execute(
+        "SELECT source_id, run_id, validated_run_id FROM bronze.raw_records ORDER BY source_id"
+    ).fetchall()
+    # Valid and invalid rows alike: the run that checked them, not the one that fetched them.
+    assert rows == [("1", fetching_run, checking_run), ("2", fetching_run, checking_run)]
+
+
 def test_rows_already_validated_are_not_checked_again(db, make_run, crime_record):
     run_id = make_run()
     load_bronze(db, run_id, [variant(crime_record, 1, year="1999")])
-    db.execute("UPDATE bronze.raw_records SET validation_status = 'valid'")
+    db.execute(
+        "UPDATE bronze.raw_records SET validation_status = 'valid', validated_run_id = run_id"
+    )
 
     stats = validate(run_id, conn=db, now=NOW)
 
