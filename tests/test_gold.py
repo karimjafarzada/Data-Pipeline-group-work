@@ -4,7 +4,7 @@ from pathlib import Path
 from pipeline.gold.load import load_gold
 
 
-def insert_silver(db, run_id, *, crime_id=1001, description="TO VEHICLE", district="008",
+def insert_silver(db, run_id, *, crime_id=1001, case_number="CASE-1", description="TO VEHICLE", district="008",
                   ward=18, community_area=66, updated="2026-11-24 15:44:55+00",
                   arrest=False):
     bronze_id = db.execute("""
@@ -30,7 +30,7 @@ def insert_silver(db, run_id, *, crime_id=1001, description="TO VEHICLE", distri
             community_area = EXCLUDED.community_area,
             source_updated_at = EXCLUDED.source_updated_at,
             run_id = EXCLUDED.run_id
-    """, (crime_id, f"CASE-{crime_id}", description, arrest, district, ward, community_area, updated, bronze_id, run_id))
+    """, (crime_id, case_number, description, arrest, district, ward, community_area, updated, bronze_id, run_id))
 
 
 def test_load_gold_creates_star_schema_rows(db, make_run):
@@ -158,7 +158,7 @@ def test_same_timestamp_location_change_rekeys_unchanged_fact(db, make_run):
         FROM gold.fact_crimes WHERE crime_id = 1001
     """).fetchone()
 
-    insert_silver(db, make_run(), crime_id=1002, ward=19)
+    insert_silver(db, make_run(), crime_id=1002, case_number="CASE-1002", ward=19)
     second_stats = load_gold(make_run(), conn=db)
     updated = db.execute("""
         SELECT location_key, bronze_id, silver_run_id
