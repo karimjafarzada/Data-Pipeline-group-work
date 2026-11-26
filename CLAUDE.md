@@ -230,6 +230,12 @@ skip values that don't parse, so one bad value is reported once. A blank string 
 - Runs at the end of `validate(run_id)`:
   failure rate = `rows_quarantined / (rows_valid + rows_quarantined)` for this run.
   Both count distinct records, so a record breaking two rules counts once.
+- The rate is based on the rows actually checked, **not** on `rows_fetched`, because `validate()`
+  also checks pending rows left by earlier runs, and `rows_fetched` includes records bronze already had:
+  `(ValidationStats.invalid + IngestStats.rows_quarantined) / (ValidationStats.checked + IngestStats.rows_quarantined)`,
+  where `IngestStats.rows_quarantined` is the `missing_source_id` records that never reached bronze.
+  The same sums go into `ops.pipeline_runs`: `rows_valid = ValidationStats.valid`,
+  `rows_quarantined = ValidationStats.invalid + IngestStats.rows_quarantined`.
 - If nothing was checked (zero records), the gate passes.
 - If the rate exceeds `QUALITY_MAX_FAILURE_RATE` (default `0.05`), raise `QualityGateError`.
 - Then the run is marked `failed` and silver and gold are **not** touched for that run.
