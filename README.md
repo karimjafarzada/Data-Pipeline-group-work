@@ -12,6 +12,8 @@ This Python pipeline loads Chicago Crimes records into PostgreSQL. Bronze stores
 
 Start Docker Desktop or Docker Engine with Compose v2. Copy `.env.example` to `.env`, set a local `POSTGRES_PASSWORD`, and optionally set `SOCRATA_APP_TOKEN`. The host uses `127.0.0.1:5433` by default. Containers use `db:5432`. Keep `.env` local.
 
+A PostgreSQL 16 volume needs migration before PostgreSQL 17 can use it. To keep existing data, back it up with PostgreSQL 16 and restore it into a new PostgreSQL 17 volume. For a disposable local database, `docker compose down --volumes` deletes its data so the next startup can initialize a fresh volume.
+
 ```sh
 docker compose up -d --wait db
 docker compose build pipeline
@@ -31,15 +33,15 @@ The runner registers each attempt in `ops.pipeline_runs`, fetches and validates 
 docker compose exec db psql -U warehouse -d warehouse -c "SELECT run_id, mode, status, rows_fetched, rows_valid, rows_quarantined, error_message FROM ops.pipeline_runs ORDER BY started_at DESC LIMIT 10;"
 ```
 
-The default quality threshold is 5%. Review `ops.quarantine` and `ops.quality_gate_results` before releasing a failed run's valid rows. A release allows those rows to be promoted by the next successful run.
+The default quality threshold is 5%. Review `ops.quarantine` and `ops.quality_gate_results` before releasing a failed run's valid rows. A failed quality gate exits with code 2. Use `--action release` to allow valid rows to be promoted on the next successful run, or `--action recheck` to return them to validation. Both actions require the investigator's name and a note.
 
 ```sh
-docker compose run --rm pipeline python -m pipeline release --run-id YOUR_RUN_UUID --released-by YOUR_NAME --note "Explain what was investigated"
+docker compose run --rm pipeline python -m pipeline release --run-id YOUR_RUN_UUID --released-by YOUR_NAME --action recheck --note "Explain what was investigated"
 ```
 
 ## Daily schedule
 
-After the initial backfill, start the scheduler. It starts an incremental run on launch and repeats daily while the container is running.
+After the initial backfill, start the scheduler. It starts an incremental run immediately on each start or restart, then repeats every 24 hours while the container is running. The interval is measured from startup, so it can shift with restarts.
 
 ```sh
 docker compose --profile scheduled up -d scheduler
@@ -61,11 +63,21 @@ The script builds the worker, creates a disposable Compose project, and uses fix
 | Case | What the demonstration checks |
 |---|---|
 | PostgreSQL unavailable at startup | The migration container logs a retry while the database is down, then creates the run-history table once Postgres starts. |
-| Ingestion container killed | The worker is killed after committing page 1. A replacement worker reloads the stored cursor and inserts page 2. The script checks that IDs 1 and 2 appear once and the final cursor is 2. |
-| Malformed batch | The real CLI ingests `tests/fixtures/malformed_batch.json`. Seven of 20 records fail, so the run exits with code 2, records 13 valid and 7 quarantined rows, and stops before either loader runs. Eight quarantine entries record the separate rule violations. |
+| Ingestion container killed | The worker is killed after committing page 1. The replacement CLI marks the interrupted run failed, reloads the stored cursor, and inserts page 2. The script checks that IDs 1 and 2 appear once and the final cursor is 2. |
+| Malformed batch | The real CLI ingests `tests/fixtures/malformed_batch.json`. The run exits with code 2 and stops before either loader runs. The script checks counts and quarantine entries against the fixture's expected values. |
 
-The [Docker recovery run](https://github.com/karimjafarzada/Data-Pipeline-group-work/actions/runs/45811539930) passed all three scenarios. The [lint and PostgreSQL integration run](https://github.com/karimjafarzada/Data-Pipeline-group-work/actions/runs/45811634831) passed Ruff and 278 pytest tests.
+See the [GitHub Actions workflow](https://github.com/karimjafarzada/Data-Pipeline-group-work/actions/workflows/postgres-smoke.yml) for current recovery, lint, and integration results.
+
+## Run tests locally
+
+```sh
+python -m pip install -e '.[dev]'
+ruff check src tests
+python -m pytest -ra
+```
+
+For integration tests, start the Compose database and export `POSTGRES_HOST=127.0.0.1`, `POSTGRES_PORT=5433`, `POSTGRES_USER=warehouse`, `POSTGRES_DB=warehouse`, and the local `POSTGRES_PASSWORD` in the terminal running pytest. Use the published port if you changed it. Tests create and remove temporary databases. PostgreSQL tests are skipped locally when the database is unavailable and fail when `CI` is set.
 
 ## Reviews and CI
 
-Use a feature branch for each change and get a teammate's approval before merging a PR into `main`. Keep commits small and use Conventional Commits. The workflow checks Docker startup, Ruff lint, migrations, and pytest with PostgreSQL. Install the local hook with `python -m pip install pre-commit` and `pre-commit install`.
+Use a feature branch for each change and get a teammate's approval before merging a PR into `main`. Keep commits small and use Conventional Commits. The workflow checks Docker startup, Ruff lint, migrations, and pytest with PostgreSQL. Install the development extras and run `pre-commit install` to enable the local lint hook.
