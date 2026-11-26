@@ -15,7 +15,7 @@ services:
       timeout: 3s
       retries: 20
 
-  pipeline:
+  pipeline: &pipeline
     build: .
     profiles: [tools]
     environment:
@@ -28,9 +28,16 @@ services:
       SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN:-}
       QUALITY_MAX_FAILURE_RATE: ${QUALITY_MAX_FAILURE_RATE:-0.05}
       API_INCREMENTAL_TIMEOUT_SECONDS: ${API_INCREMENTAL_TIMEOUT_SECONDS:-120}
+      SCHEDULE_INTERVAL_SECONDS: ${SCHEDULE_INTERVAL_SECONDS:-86400}
     depends_on:
       db:
         condition: service_healthy
+
+  scheduler:
+    <<: *pipeline
+    profiles: [scheduled]
+    command: ["python", "-m", "pipeline.scheduler"]
+    restart: unless-stopped
 
 volumes:
   postgres_data:
