@@ -4,21 +4,21 @@ from pathlib import Path
 from pipeline.gold.load import load_gold
 
 
-def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
+def insert_silver(db, run_id, *, crime_id=1001, description="TO VEHICLE", district="008",
                   ward=18, community_area=66, updated="2026-11-24 15:44:55+00",
                   arrest=False):
     bronze_id = db.execute("""
         INSERT INTO bronze.raw_records
             (endpoint, source_id, payload, payload_hash, run_id)
-        VALUES ('ijzp-q8t2', '1001', '{}'::jsonb, %s, %s)
+        VALUES ('ijzp-q8t2', %s, '{}'::jsonb, %s, %s)
         RETURNING id
-    """, (f"gold-fixture-{run_id}", run_id)).fetchone()[0]
+    """, (str(crime_id), f"gold-fixture-{run_id}-{crime_id}", run_id)).fetchone()[0]
     db.execute("""
         INSERT INTO silver.crimes
             (id, case_number, occurred_at, iucr, primary_type, description,
              arrest, domestic, beat, district, ward, community_area, year,
              source_updated_at, bronze_id, run_id)
-        VALUES (1001, 'CASE-1', '2026-11-16 10:30:00-06', '1320',
+        VALUES (%s, %s, '2026-11-16 10:30:00-06', '1320',
                 'CRIMINAL DAMAGE', %s, %s, false, '0831', %s, %s, %s, 2026,
                 %s::timestamptz, %s, %s)
         ON CONFLICT (id) DO UPDATE SET
@@ -30,7 +30,7 @@ def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
             community_area = EXCLUDED.community_area,
             source_updated_at = EXCLUDED.source_updated_at,
             run_id = EXCLUDED.run_id
-    """, (description, arrest, district, ward, community_area, updated, bronze_id, run_id))
+    """, (crime_id, f"CASE-{crime_id}", description, arrest, district, ward, community_area, updated, bronze_id, run_id))
 
 
 def test_load_gold_creates_star_schema_rows(db, make_run):
