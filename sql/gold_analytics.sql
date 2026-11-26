@@ -16,12 +16,22 @@ SELECT year, month, month_name, crime_count, previous_month_count,
 FROM with_previous
 ORDER BY year, month;
 
--- 2. Rolling seven-day crime count.
-WITH daily AS (
-    SELECT d.full_date, count(*) AS crime_count
-    FROM gold.fact_crimes f
-    JOIN gold.dim_date d USING (date_key)
-    GROUP BY d.full_date
+-- 2. Rolling seven-calendar-day crime count, including days with zero crimes.
+WITH bounds AS (
+    SELECT min(full_date) AS first_day, max(full_date) AS last_day
+    FROM gold.dim_date
+),
+calendar AS (
+    SELECT generated_day::date AS full_date
+    FROM bounds,
+         generate_series(first_day, last_day, interval '1 day') AS generated_day
+),
+daily AS (
+    SELECT c.full_date, count(f.crime_id) AS crime_count
+    FROM calendar c
+    LEFT JOIN gold.dim_date d ON d.full_date = c.full_date
+    LEFT JOIN gold.fact_crimes f ON f.date_key = d.date_key
+    GROUP BY c.full_date
 )
 SELECT full_date, crime_count,
        sum(crime_count) OVER (
