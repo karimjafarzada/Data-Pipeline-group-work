@@ -1,9 +1,5 @@
 """Integration tests for the Gold loader and SCD2 location dimension."""
-from datetime import datetime, timezone
-
-from pipeline.gold.load import GoldStats, load_gold
-
-UTC = timezone.utc
+from pipeline.gold.load import load_gold
 
 
 def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
@@ -104,7 +100,8 @@ def test_newer_silver_version_updates_fact_without_duplicate(db, make_run):
 
 def test_empty_silver_is_a_noop(db, make_run):
     stats = load_gold(make_run(), conn=db)
-    assert stats == GoldStats()
+    assert stats.source_rows == 0
+    assert stats.facts_inserted == stats.facts_updated == stats.facts_unchanged == 0
 
 
 def test_gold_loader_rejects_invalid_batch_size(db, make_run):
@@ -114,6 +111,13 @@ def test_gold_loader_rejects_invalid_batch_size(db, make_run):
 
 
 def test_gold_loader_preserves_connection_autocommit(db, make_run):
+    run_id = make_run()
+    db.commit()
     db.autocommit = False
-    load_gold(make_run(), conn=db)
+    load_gold(run_id, conn=db)
     assert db.autocommit is False
+
+
+def test_gold_schema_tables_exist(db):
+    for table in ("gold.dim_date", "gold.dim_crime_type", "gold.dim_location", "gold.fact_crimes"):
+        assert db.execute("SELECT to_regclass(%s) IS NOT NULL", (table,)).fetchone()[0], table
