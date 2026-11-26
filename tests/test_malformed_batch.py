@@ -1,10 +1,11 @@
 """End to end: a mixed batch of good and broken records from a mocked API through
-ingest() and validate(). The same fixture file drives the quality-gate failure demo.
+ingest(), validate() and the quality gate, which must reject it (7 of 20 broken).
 """
 
 import json
 from collections import Counter
 from datetime import date, datetime
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from responses import matchers
 from pipeline.ingestion.bronze import CHICAGO
 from pipeline.ingestion.client import SocrataClient
 from pipeline.ingestion.ingest import ingest
+from pipeline.quality.gate import THRESHOLD_ENV, QualityGateError, run_quality_gate
 from pipeline.quality.validate import validate
 
 BATCH_FILE = Path(__file__).parent / "fixtures" / "malformed_batch.json"
@@ -28,8 +30,8 @@ def batch():
 
 
 @pytest.fixture
-def ingested(db, make_run, batch):
-    """Serve the batch as one API page, ingest it as a backfill, and return the run_id."""
+def ingest_result(db, make_run, batch):
+    """Serve the batch as one API page, ingest it as a backfill: (run_id, IngestStats)."""
     run_id = make_run()
     client = SocrataClient(BASE_URL, page_size=50, sleep=lambda seconds: None)
     where = "date >= '2026-11-01T00:00:00' AND date < '2026-12-01T00:00:00'"
@@ -41,7 +43,13 @@ def ingested(db, make_run, batch):
         )
         stats = ingest(run_id, "backfill", START, END, conn=db, client=client)
     assert (stats.rows_fetched, stats.rows_inserted) == (20, 20)
-    return run_id
+    return run_id, stats
+
+
+@pytest.fixture
+def ingested(ingest_result):
+    """The run_id of the ingested batch."""
+    return ingest_result[0]
 
 
 def test_malformed_batch_counts(db, ingested, batch):
@@ -75,7 +83,33 @@ def test_malformed_batch_statuses(db, ingested, batch):
     assert statuses == {"valid": 13, "invalid": 7}
 
 
-def test_malformed_batch_failure_rate_is_well_over_the_gate(db, ingested):
-    # 7 of 20 = 35%: the next branch's quality gate (5% by default) must reject this run.
-    stats = validate(ingested, conn=db, now=NOW)
-    assert stats.invalid / stats.checked == pytest.approx(0.35)
+def test_malformed_batch_fails_the_quality_gate(db, ingest_result, monkeypatch):
+    monkeypatch.delenv(THRESHOLD_ENV, raising=False)  # the default threshold, 5%
+    run_id, ingest_stats = ingest_result
+    validation_stats = validate(run_id, conn=db, now=NOW)
+
+    with pytest.raises(QualityGateError, match=r"7 of 20 records failed \(35\.00%\)") as error:
+        run_quality_gate(run_id, ingest_stats, validation_stats, conn=db)
+
+    assert error.value.result.rate == Fraction(7, 20)
+    passed = db.execute(
+        "SELECT passed FROM ops.quality_gate_results WHERE run_id = %s", (run_id,)
+    ).fetchone()[0]
+    assert passed is False
+
+
+def test_failed_gate_keeps_bronze_and_quarantine_but_promotes_nothing(db, ingest_result):
+    run_id, ingest_stats = ingest_result
+    validation_stats = validate(run_id, conn=db, now=NOW)
+
+    with pytest.raises(QualityGateError):
+        run_quality_gate(run_id, ingest_stats, validation_stats, conn=db, threshold="0.05")
+
+    def count(table):
+        return db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+    # Everything stays for investigation, but none of the 13 valid rows may reach silver.
+    assert count("bronze.raw_records") == 20
+    assert count("bronze.raw_records WHERE validation_status = 'valid'") == 13
+    assert count("ops.quarantine") == 8
+    assert count("bronze.promotable_records") == 0
