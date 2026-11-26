@@ -19,7 +19,7 @@ def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
              arrest, domestic, beat, district, ward, community_area, year,
              source_updated_at, bronze_id, run_id)
         VALUES (1001, 'CASE-1', '2026-11-16 10:30:00-06', '1320',
-                'CRIMINAL DAMAGE', %s, false, false, '0831', %s, %s, %s, 2026,
+                'CRIMINAL DAMAGE', %s, %s, false, '0831', %s, %s, %s, 2026,
                 %s::timestamptz, %s, %s)
         ON CONFLICT (id) DO UPDATE SET
             description = EXCLUDED.description,
@@ -30,7 +30,7 @@ def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
             community_area = EXCLUDED.community_area,
             source_updated_at = EXCLUDED.source_updated_at,
             run_id = EXCLUDED.run_id
-    """, (description, district, ward, community_area, updated, bronze_id, run_id))
+    """, (description, arrest, district, ward, community_area, updated, bronze_id, run_id))
 
 
 def test_load_gold_creates_star_schema_rows(db, make_run):
