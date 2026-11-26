@@ -82,9 +82,7 @@ def parse_float(value: Any) -> float | None:
     """A finite number, or a string like '41.76' or '1159193'. Anything else gives None."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        number = float(value)
-    elif isinstance(value, str) and _DECIMAL.fullmatch(value):
+    if isinstance(value, (int, float)) or (isinstance(value, str) and _DECIMAL.fullmatch(value)):
         number = float(value)
     else:
         return None
