@@ -194,6 +194,66 @@ def test_response_that_is_not_json_raises(mocked_api, client):
         client.fetch_page()
 
 
+# --- paging -----------------------------------------------------------------
+
+
+def page_matcher(where=None, limit="3"):
+    params = {"$limit": limit, "$order": "id"}
+    if where is not None:
+        params["$where"] = where
+    return [matchers.query_param_matcher(params)]
+
+
+def test_iter_pages_stops_on_short_page(mocked_api, make_client):
+    mocked_api.get(URL, json=records(1, 2, 3), match=page_matcher())
+    mocked_api.get(URL, json=records(4, 5, 6), match=page_matcher("id > 3"))
+    mocked_api.get(URL, json=records(7), match=page_matcher("id > 6"))
+
+    pages = list(make_client(page_size=3).iter_pages())
+
+    assert pages == [records(1, 2, 3), records(4, 5, 6), records(7)]
+    assert len(mocked_api.calls) == 3
+
+
+def test_iter_pages_skips_the_empty_last_page(mocked_api, make_client):
+    mocked_api.get(URL, json=records(1, 2, 3), match=page_matcher())
+    mocked_api.get(URL, json=[], match=page_matcher("id > 3"))
+
+    pages = list(make_client(page_size=3).iter_pages())
+
+    assert pages == [records(1, 2, 3)]
+
+
+def test_iter_pages_keeps_the_date_filter_on_every_page(mocked_api, make_client):
+    dates = "date >= '2024-01-01T00:00:00' AND date < '2024-01-02T00:00:00'"
+    mocked_api.get(URL, json=records(1, 2, 3), match=page_matcher(dates))
+    mocked_api.get(URL, json=records(4), match=page_matcher(f"id > 3 AND {dates}"))
+
+    pages = list(
+        make_client(page_size=3).iter_pages(
+            start_date=date(2024, 1, 1), end_date=date(2024, 1, 1)
+        )
+    )
+
+    assert pages == [records(1, 2, 3), records(4)]
+
+
+def test_iter_pages_resumes_from_after_id(mocked_api, make_client):
+    mocked_api.get(URL, json=records(501, 502), match=page_matcher("id > 500"))
+
+    pages = list(make_client(page_size=3).iter_pages(after_id=500))
+
+    assert pages == [records(501, 502)]
+
+
+def test_iter_pages_stops_if_paging_does_not_move_forward(mocked_api, make_client):
+    # A broken API that ignores the id filter would otherwise loop forever.
+    mocked_api.get(URL, json=records(1, 2, 3), match=page_matcher("id > 10"))
+
+    with pytest.raises(ApiResponseError, match="did not move forward"):
+        list(make_client(page_size=3).iter_pages(after_id=10))
+
+
 # --- retries ----------------------------------------------------------------
 
 

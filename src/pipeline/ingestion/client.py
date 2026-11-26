@@ -10,7 +10,7 @@ import logging
 import math
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date, timedelta
 from typing import Any
 
@@ -171,6 +171,28 @@ class SocrataClient:
         logger.info("Fetched page after_id=%s rows=%d", after_id, len(rows))
         return rows
 
+    def iter_pages(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        after_id: int | str | None = None,
+        limit: int | None = None,
+    ) -> Iterator[list[Record]]:
+        """Yield pages of records in ``id`` order until a page comes back short.
+
+        Pass the last ``after_id`` you saved to resume. Empty pages are not yielded.
+        """
+        if limit is None:
+            limit = self.page_size
+
+        while True:
+            page = self.fetch_page(after_id, limit, start_date, end_date)
+            if page:
+                yield page
+            if len(page) < limit:
+                return
+            after_id = _next_after_id(page, after_id)
+
     def _get(self, params: dict[str, str]) -> requests.Response:
         """Send one request and turn a bad status code into the matching error."""
         response = self.session.get(
@@ -218,6 +240,20 @@ def _parse_retry_after(value: str | None) -> float | None:
     if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
+
+
+def _next_after_id(page: list[Record], previous: int | str | None) -> int:
+    """The highest id on the page: where the next page starts."""
+    ids = [int(record["id"]) for record in page if "id" in record]
+    if not ids:
+        raise ApiResponseError("A full page has no record ids, so paging can't continue")
+    next_id = max(ids)
+    # The API should only return ids above `previous`; stop rather than loop forever.
+    if previous is not None and next_id <= int(previous):
+        raise ApiResponseError(
+            f"Paging did not move forward (after_id {previous}, page max id {next_id})"
+        )
+    return next_id
 
 
 def _parse_records(response: requests.Response) -> list[Record]:
