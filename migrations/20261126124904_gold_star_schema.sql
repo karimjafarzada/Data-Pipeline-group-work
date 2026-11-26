@@ -63,6 +63,7 @@ CREATE TABLE gold.fact_crimes (
     longitude        DOUBLE PRECISION,
     source_updated_at TIMESTAMPTZ NOT NULL,
     silver_run_id    UUID NOT NULL REFERENCES ops.pipeline_runs (run_id),
+    run_id           UUID NOT NULL REFERENCES ops.pipeline_runs (run_id), -- Gold load run
     loaded_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
