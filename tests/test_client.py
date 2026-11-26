@@ -163,6 +163,29 @@ def test_from_env_reads_base_url_and_token(mocked_api, monkeypatch, sleeps):
     assert client.url == URL
 
 
+def test_from_env_reads_the_incremental_timeout(monkeypatch):
+    monkeypatch.setenv("API_BASE_URL", BASE_URL)
+    monkeypatch.setenv("API_INCREMENTAL_TIMEOUT_SECONDS", "45")
+
+    assert SocrataClient.from_env().incremental_timeout == 45.0
+
+
+def test_incremental_timeout_defaults_to_120_seconds(monkeypatch):
+    monkeypatch.setenv("API_BASE_URL", BASE_URL)
+    monkeypatch.delenv("API_INCREMENTAL_TIMEOUT_SECONDS", raising=False)
+
+    assert SocrataClient.from_env().incremental_timeout == 120.0
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-5", "inf"])
+def test_from_env_rejects_a_bad_incremental_timeout(monkeypatch, bad):
+    monkeypatch.setenv("API_BASE_URL", BASE_URL)
+    monkeypatch.setenv("API_INCREMENTAL_TIMEOUT_SECONDS", bad)
+
+    with pytest.raises(ApiConfigError, match="API_INCREMENTAL_TIMEOUT_SECONDS"):
+        SocrataClient.from_env()
+
+
 def test_from_env_without_base_url_raises_clear_error(monkeypatch):
     monkeypatch.delenv("API_BASE_URL", raising=False)
 
@@ -276,6 +299,18 @@ def changes_matcher(ts, after_id, limit="2"):
 
 T1 = "2025-01-01T15:40:23.000"
 T2 = "2025-01-02T08:00:00.000"
+
+
+def test_changes_requests_use_the_incremental_timeout(mocked_api, make_client):
+    mocked_api.get(URL, json=[])
+    mocked_api.get(URL, json=[])
+    client = make_client(timeout=30, incremental_timeout=120)
+
+    client.fetch_page()
+    client.fetch_changes_page(T1)
+
+    timeouts = [call.request.req_kwargs["timeout"] for call in mocked_api.calls]
+    assert timeouts == [30, 120]
 
 
 def test_changes_page_orders_by_updated_on_then_id(mocked_api, client):

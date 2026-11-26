@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 DATASET_ID = "ijzp-q8t2"
 DEFAULT_PAGE_SIZE = 5000
 DEFAULT_TIMEOUT_SECONDS = 30.0
+# "Changed since" queries sort by updated_on and are slow on the API's side.
+DEFAULT_INCREMENTAL_TIMEOUT_SECONDS = 120.0
+INCREMENTAL_TIMEOUT_ENV = "API_INCREMENTAL_TIMEOUT_SECONDS"
 DEFAULT_MAX_ATTEMPTS = 5
 # Backoff waits 1s, 2s, 4s, ... and never more than this.
 MAX_BACKOFF_SECONDS = 30.0
@@ -139,6 +142,7 @@ class SocrataClient:
         app_token: str | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        incremental_timeout: float = DEFAULT_INCREMENTAL_TIMEOUT_SECONDS,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         session: requests.Session | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -147,12 +151,15 @@ class SocrataClient:
             raise ApiConfigError("base_url is required")
         if page_size < 1:
             raise ValueError("page_size must be at least 1")
+        if timeout <= 0 or incremental_timeout <= 0:
+            raise ValueError("timeouts must be more than 0 seconds")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
 
         self.url = f"{base_url.rstrip('/')}/resource/{DATASET_ID}.json"
         self.page_size = page_size
-        self.timeout = timeout
+        self.timeout = timeout  # for backfill (id-ordered) requests
+        self.incremental_timeout = incremental_timeout  # for "changed since" requests
         self.max_attempts = max_attempts
         self.session = session or requests.Session()
         # The token goes in a header, never in the URL, so it can't end up in logs.
@@ -163,11 +170,15 @@ class SocrataClient:
 
     @classmethod
     def from_env(cls, **kwargs: Any) -> SocrataClient:
-        """Build a client from API_BASE_URL and the optional SOCRATA_APP_TOKEN."""
+        """Build a client from API_BASE_URL and the optional SOCRATA_APP_TOKEN and
+        API_INCREMENTAL_TIMEOUT_SECONDS. Keyword arguments override the environment."""
         base_url = os.environ.get("API_BASE_URL")
         if not base_url:
             raise ApiConfigError("API_BASE_URL is not set. Add it to your .env file.")
         app_token = os.environ.get("SOCRATA_APP_TOKEN") or None
+        raw_timeout = os.environ.get(INCREMENTAL_TIMEOUT_ENV)
+        if raw_timeout and "incremental_timeout" not in kwargs:
+            kwargs["incremental_timeout"] = _parse_seconds(INCREMENTAL_TIMEOUT_ENV, raw_timeout)
         return cls(base_url, app_token=app_token, **kwargs)
 
     def fetch_page(
@@ -181,7 +192,7 @@ class SocrataClient:
         if limit is None:
             limit = self.page_size
         params = build_query_params(limit, after_id, start_date, end_date)
-        rows = self._fetch(params)
+        rows = self._fetch(params, self.timeout)
         logger.info("Fetched page after_id=%s rows=%d", after_id, len(rows))
         return rows
 
@@ -192,13 +203,13 @@ class SocrataClient:
         if limit is None:
             limit = self.page_size
         params = build_changes_query_params(limit, updated_after, after_id)
-        rows = self._fetch(params)
+        rows = self._fetch(params, self.incremental_timeout)
         logger.info(
             "Fetched changes page after=%s|%s rows=%d", updated_after, after_id, len(rows)
         )
         return rows
 
-    def _fetch(self, params: dict[str, str]) -> list[Record]:
+    def _fetch(self, params: dict[str, str], timeout: float) -> list[Record]:
         """Send the request with retries and return the parsed list of records."""
         retrying = Retrying(
             retry=retry_if_exception_type(RETRYABLE_ERRORS),
@@ -209,7 +220,7 @@ class SocrataClient:
             # Raise the last real error (e.g. ApiServerError), not tenacity's RetryError.
             reraise=True,
         )
-        response = retrying(self._get, params)
+        response = retrying(self._get, params, timeout)
         return _parse_records(response)
 
     def iter_pages(
@@ -252,10 +263,10 @@ class SocrataClient:
                 return
             updated_after, after_id = _next_change_cursor(page, (updated_after, after_id))
 
-    def _get(self, params: dict[str, str]) -> requests.Response:
+    def _get(self, params: dict[str, str], timeout: float) -> requests.Response:
         """Send one request and turn a bad status code into the matching error."""
         response = self.session.get(
-            self.url, params=params, headers=self._headers, timeout=self.timeout
+            self.url, params=params, headers=self._headers, timeout=timeout
         )
         status = response.status_code
         if status == 429:
@@ -282,6 +293,17 @@ class SocrataClient:
             retry_state.outcome.exception(),
             retry_state.next_action.sleep,
         )
+
+
+def _parse_seconds(name: str, value: str) -> float:
+    """Read a positive number of seconds from an environment variable."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ApiConfigError(f"{name} must be a positive number of seconds, got {value!r}")
+    return seconds
 
 
 def _parse_retry_after(value: str | None) -> float | None:

@@ -236,7 +236,9 @@ CLI entrypoint (scheduled by Student 3):
 
 ### Environment variables
 `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`API_BASE_URL`, `SOCRATA_APP_TOKEN` (sent as the `X-App-Token` header), `QUALITY_MAX_FAILURE_RATE`.
+`API_BASE_URL`, `SOCRATA_APP_TOKEN` (sent as the `X-App-Token` header), `QUALITY_MAX_FAILURE_RATE`,
+`API_INCREMENTAL_TIMEOUT_SECONDS` (optional, default `120`: the timeout for incremental "changed since"
+requests, which are slow on the API's side; backfill requests use 30 seconds).
 `POSTGRES_HOST` / `POSTGRES_PORT` are where the pipeline connects: `db` / `5432` inside Docker,
 `127.0.0.1` / the published port from the host.
 Real values live in `.env` (gitignored); `.env.example` lists the names with dummy values.
@@ -244,5 +246,6 @@ Real values live in `.env` (gitignored); `.env.example` lists the names with dum
 ## Open items (owner: Student 3)
 - `compose.yaml` on `feat/docker-postgres` uses `POSTGRES_PORT` for the published host port (5433).
   That clashes with the meaning above; rename the published one (e.g. `POSTGRES_HOST_PORT`).
-- Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN` and `QUALITY_MAX_FAILURE_RATE` to `.env.example`.
+- Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN`, `QUALITY_MAX_FAILURE_RATE` and
+  `API_INCREMENTAL_TIMEOUT_SECONDS` to `.env.example`.
 - README does not list team members yet.
