@@ -19,7 +19,7 @@ reference catalogue.
 
 Apply migrations with `python -m pipeline.migrate`, then call `pipeline.gold.load.load_gold(run_id)`
 after the quality gate and Silver build. The caller supplies the run UUID created by
-`start_run()`. The loader uses POSTGRES_* environment variables when no connection is injected.
+`start_run()`. The loader uses POSTGRES_* environment variables when no connection is injected. It performs the large transformations with server-side `INSERT ... SELECT` statements and temporary staging tables, so million-row loads stay inside PostgreSQL instead of round-tripping records through Python.
 
 ## Analytics
 
