@@ -55,7 +55,24 @@ orchestration / run tracking (Student 3) without asking first.
 
 ### Schemas
 `bronze`, `silver`, `gold`, and `ops` (pipeline bookkeeping).
-Migration order: `ops` first, because bronze references `ops.pipeline_runs`.
+Migration order: `ops` first, because bronze references `ops.pipeline_runs` (see "Migrations").
+
+### Migrations
+- SQL files live in `migrations/`, named `<UTC timestamp>_<description>.sql`: 14 digits, then
+  lowercase letters, digits and underscores, e.g. `20261126101100_bronze_raw_records.sql`.
+  Take the timestamp from `date -u +%Y%m%d%H%M%S` when you create the file, so teammates
+  never pick the same name. Any other name makes the runner stop with an error.
+- Files are applied in name order, so a table must be created by an older file than any file
+  that references it. `ops.pipeline_runs` (Student 3) must sort before `20261126101100`,
+  e.g. `20261126000000_ops_pipeline_runs.sql`, because bronze, checkpoint and quarantine reference it.
+- Apply them with `python -m pipeline.migrate` (reads the `POSTGRES_*` variables). Each file
+  runs once, in its own transaction, together with its row in
+  `ops.schema_migrations (filename, applied_at)`, so a failed file leaves no trace and running
+  the command again applies only new files. An advisory lock stops two runners at once.
+- Never edit a migration that has been applied anywhere; add a new file instead.
+  Don't put `BEGIN` / `COMMIT` in migration files.
+- Tests apply every migration to a fresh throwaway database. Until Student 3's `pipeline_runs`
+  migration exists, they first load the test-only copy in `tests/sql/ops_pipeline_runs_stub.sql`.
 
 ### run_id
 - A UUID created once at the start of every run by `start_run()` (owner: Student 3).
@@ -236,7 +253,9 @@ CLI entrypoint (scheduled by Student 3):
 
 ### Environment variables
 `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`API_BASE_URL`, `SOCRATA_APP_TOKEN` (sent as the `X-App-Token` header), `QUALITY_MAX_FAILURE_RATE`.
+`API_BASE_URL`, `SOCRATA_APP_TOKEN` (sent as the `X-App-Token` header), `QUALITY_MAX_FAILURE_RATE`,
+`API_INCREMENTAL_TIMEOUT_SECONDS` (optional, default `120`: the timeout for incremental "changed since"
+requests, which are slow on the API's side; backfill requests use 30 seconds).
 `POSTGRES_HOST` / `POSTGRES_PORT` are where the pipeline connects: `db` / `5432` inside Docker,
 `127.0.0.1` / the published port from the host.
 Real values live in `.env` (gitignored); `.env.example` lists the names with dummy values.
@@ -244,5 +263,6 @@ Real values live in `.env` (gitignored); `.env.example` lists the names with dum
 ## Open items (owner: Student 3)
 - `compose.yaml` on `feat/docker-postgres` uses `POSTGRES_PORT` for the published host port (5433).
   That clashes with the meaning above; rename the published one (e.g. `POSTGRES_HOST_PORT`).
-- Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN` and `QUALITY_MAX_FAILURE_RATE` to `.env.example`.
+- Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN`, `QUALITY_MAX_FAILURE_RATE` and
+  `API_INCREMENTAL_TIMEOUT_SECONDS` to `.env.example`.
 - README does not list team members yet.
