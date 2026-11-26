@@ -1,4 +1,6 @@
 """Integration tests for the Gold loader and SCD2 location dimension."""
+from pathlib import Path
+
 from pipeline.gold.load import load_gold
 
 
@@ -114,3 +116,12 @@ def test_gold_loader_preserves_connection_autocommit(db, make_run):
 def test_gold_schema_tables_exist(db):
     for table in ("gold.dim_date", "gold.dim_crime_type", "gold.dim_location", "gold.fact_crimes"):
         assert db.execute("SELECT to_regclass(%s) IS NOT NULL", (table,)).fetchone()[0], table
+
+
+def test_analytical_sql_runs_against_fixture_data(db, make_run):
+    insert_silver(db, make_run())
+    load_gold(make_run(), conn=db)
+    query_file = Path(__file__).resolve().parents[1] / "sql" / "gold_analytics.sql"
+    for statement in query_file.read_text(encoding="utf-8").split(";"):
+        if statement.strip():
+            db.execute(statement)
