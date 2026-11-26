@@ -46,6 +46,8 @@ jobs:
           docker compose run --rm pipeline python -m pipeline --help
           docker compose run --rm pipeline python -c 'from pipeline.migrate import find_migrations; assert find_migrations()'
           docker compose run --rm pipeline python -m pipeline.migrate
+      - name: Run Docker recovery demonstrations
+        run: bash scripts/recovery_demo.sh
       - name: Show server logs on failure
         if: failure()
         run: docker compose logs db
