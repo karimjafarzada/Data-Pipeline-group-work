@@ -4,13 +4,16 @@ import logging
 from datetime import date
 
 import pytest
+import requests
 import responses
 from responses import matchers
 
 from pipeline.ingestion.client import (
     ApiConfigError,
+    ApiRateLimitError,
     ApiRequestError,
     ApiResponseError,
+    ApiServerError,
     SocrataClient,
 )
 
@@ -31,8 +34,23 @@ def mocked_api():
 
 
 @pytest.fixture
-def client():
-    return SocrataClient(BASE_URL)
+def sleeps():
+    """Every wait the client asks for, recorded instead of really sleeping."""
+    return []
+
+
+@pytest.fixture
+def make_client(sleeps):
+    def _make(**kwargs):
+        kwargs.setdefault("sleep", sleeps.append)
+        return SocrataClient(BASE_URL, **kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def client(make_client):
+    return make_client()
 
 
 # --- query parameters -------------------------------------------------------
@@ -87,14 +105,22 @@ def test_fetch_page_accepts_only_a_start_date(mocked_api, client):
     client.fetch_page(start_date=date(2024, 3, 5))
 
 
-def test_page_size_is_configurable(mocked_api):
+def test_page_size_is_configurable(mocked_api, make_client):
     mocked_api.get(
         URL,
         json=[],
         match=[matchers.query_param_matcher({"$limit": "250", "$order": "id"})],
     )
 
-    SocrataClient(BASE_URL, page_size=250).fetch_page()
+    make_client(page_size=250).fetch_page()
+
+
+def test_every_request_has_a_timeout(mocked_api, make_client):
+    mocked_api.get(URL, json=[])
+
+    make_client(timeout=12).fetch_page()
+
+    assert mocked_api.calls[0].request.req_kwargs["timeout"] == 12
 
 
 def test_start_date_after_end_date_is_rejected(client):
@@ -105,12 +131,12 @@ def test_start_date_after_end_date_is_rejected(client):
 # --- app token --------------------------------------------------------------
 
 
-def test_app_token_is_sent_as_header(mocked_api):
+def test_app_token_is_sent_as_header(mocked_api, make_client):
     mocked_api.get(
         URL, json=[], match=[matchers.header_matcher({"X-App-Token": "secret-token"})]
     )
 
-    SocrataClient(BASE_URL, app_token="secret-token").fetch_page()
+    make_client(app_token="secret-token").fetch_page()
 
 
 def test_no_app_token_header_without_token(mocked_api, client):
@@ -124,14 +150,14 @@ def test_no_app_token_header_without_token(mocked_api, client):
 # --- configuration from the environment -------------------------------------
 
 
-def test_from_env_reads_base_url_and_token(mocked_api, monkeypatch):
+def test_from_env_reads_base_url_and_token(mocked_api, monkeypatch, sleeps):
     monkeypatch.setenv("API_BASE_URL", BASE_URL + "/")
     monkeypatch.setenv("SOCRATA_APP_TOKEN", "env-token")
     mocked_api.get(
         URL, json=[], match=[matchers.header_matcher({"X-App-Token": "env-token"})]
     )
 
-    client = SocrataClient.from_env()
+    client = SocrataClient.from_env(sleep=sleeps.append)
     client.fetch_page()
 
     assert client.url == URL
@@ -166,6 +192,87 @@ def test_response_that_is_not_json_raises(mocked_api, client):
 
     with pytest.raises(ApiResponseError, match="not valid JSON"):
         client.fetch_page()
+
+
+# --- retries ----------------------------------------------------------------
+
+
+def test_429_then_success_waits_for_retry_after(mocked_api, client, sleeps):
+    mocked_api.get(URL, status=429, headers={"Retry-After": "7"})
+    mocked_api.get(URL, json=records(1))
+
+    assert client.fetch_page() == records(1)
+    assert len(mocked_api.calls) == 2
+    assert sleeps == [7.0]
+
+
+def test_429_without_retry_after_uses_backoff(mocked_api, client, sleeps):
+    mocked_api.get(URL, status=429)
+    mocked_api.get(URL, json=records(1))
+
+    assert client.fetch_page() == records(1)
+    assert sleeps == [1.0]
+
+
+def test_long_retry_after_is_capped(mocked_api, client, sleeps):
+    mocked_api.get(URL, status=429, headers={"Retry-After": "3600"})
+    mocked_api.get(URL, json=[])
+
+    client.fetch_page()
+
+    assert sleeps == [60.0]
+
+
+def test_repeated_429s_raise_rate_limit_error(mocked_api, make_client):
+    mocked_api.get(URL, status=429)
+
+    with pytest.raises(ApiRateLimitError):
+        make_client(max_attempts=3).fetch_page()
+
+    assert len(mocked_api.calls) == 3
+
+
+def test_repeated_500s_retry_with_backoff_then_raise(mocked_api, make_client, sleeps):
+    mocked_api.get(URL, status=500)
+
+    with pytest.raises(ApiServerError, match="HTTP 500"):
+        make_client(max_attempts=4).fetch_page()
+
+    assert len(mocked_api.calls) == 4
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.ReadTimeout("too slow"), requests.ConnectionError("connection refused")],
+)
+def test_timeouts_and_connection_errors_are_retried(mocked_api, client, sleeps, error):
+    mocked_api.get(URL, body=error)
+    mocked_api.get(URL, json=records(1))
+
+    assert client.fetch_page() == records(1)
+    assert sleeps == [1.0]
+
+
+def test_client_error_is_not_retried(mocked_api, client, sleeps):
+    mocked_api.get(URL, status=404)
+
+    with pytest.raises(ApiRequestError, match="HTTP 404"):
+        client.fetch_page()
+
+    assert len(mocked_api.calls) == 1
+    assert sleeps == []
+
+
+def test_retries_are_logged(mocked_api, client, caplog):
+    mocked_api.get(URL, status=503)
+    mocked_api.get(URL, json=[])
+
+    with caplog.at_level(logging.WARNING, logger="pipeline.ingestion.client"):
+        client.fetch_page()
+
+    assert "attempt 1/5" in caplog.text
+    assert "HTTP 503" in caplog.text
 
 
 # --- logging ----------------------------------------------------------------
