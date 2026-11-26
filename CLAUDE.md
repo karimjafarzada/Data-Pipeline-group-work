@@ -311,9 +311,17 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 - Every difference is written to `ops.api_schema_changes`.
 - A **new column** is logged and the run continues; bronze keeps it in `payload`.
 - A **removed or retyped column** that silver uses raises `ApiSchemaChangeError`, and the run fails
-  before anything is fetched.
+  before anything is fetched. "Used by silver" means the `CrimeRecord` source columns (each field's
+  alias, e.g. `date`, or its name): every expected column except `location`. A removed or retyped
+  column silver doesn't use is recorded and the run continues.
+- The changes are committed **before** `ApiSchemaChangeError` is raised, so a failed run shows why.
 - While paging, a record key not in the expected schema is recorded as `column_added`
-  (once per run). Missing keys are ignored, because the API omits nulls.
+  (once per run), in the same transaction as its page, with `actual_type` = its JSON type
+  prefixed with `json:` (e.g. `json:string`). Missing keys are ignored, because the API omits nulls.
+- Code: `pipeline/ingestion/schema_check.py` (`check_api_schema`, `compare_schema`,
+  `record_unexpected_keys`) and `pipeline/ingestion/expected_schema.py` (copied from the live
+  metadata on 2026-11-26: 22 columns). `SocrataClient.fetch_columns()` reads the metadata with the
+  same retries as pages.
 
 ### Python interfaces
 | Function | Module | Owner |
@@ -322,7 +330,7 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 | `start_run(mode, start=None, end=None) -> UUID` | `pipeline/runs.py` | Student 3 |
 | `finish_run(run_id, status, counts, error=None)` | `pipeline/runs.py` | Student 3 |
 | `ingest(run_id, mode, start=None, end=None) -> IngestStats` | `pipeline/ingestion/` | Student 1 |
-| `check_api_schema(run_id) -> list[SchemaChange]` (raises `ApiSchemaChangeError`) | `pipeline/ingestion/` | Student 1 |
+| `check_api_schema(run_id) -> list[SchemaChange]` (raises `ApiSchemaChangeError`) | `pipeline/ingestion/schema_check.py` | Student 1 |
 | `validate(run_id) -> ValidationStats` | `pipeline/quality/` | Student 1 |
 | `run_quality_gate(run_id, ingest_stats, validation_stats) -> GateResult` (raises `QualityGateError`) | `pipeline/quality/gate.py` | Student 1 |
 | `release_run(run_id, action, *, released_by, note) -> int` (raises `ReleaseError`) | `pipeline/quality/release.py` | Student 1 |
@@ -352,3 +360,5 @@ Real values live in `.env` (gitignored); `.env.example` lists the names with dum
   `build_silver()` (see "run_id"), and on `QualityGateError` call `finish_run(..., 'failed', ...)` with
   `rows_valid = ValidationStats.valid` and `rows_quarantined = GateResult.failed`.
 - Whether to add a CLI command for `release_run()` is still to be agreed.
+- `ingest()` raises `ApiSchemaChangeError` when the API removed or retyped a column silver uses;
+  the CLI should then call `finish_run(..., 'failed', ...)` with the error message.
