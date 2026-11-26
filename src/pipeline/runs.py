@@ -24,7 +24,10 @@ def start_run(
     *,
     conn: psycopg.Connection | None = None,
 ) -> UUID:
-    """Create and return a run ID before invoking any pipeline steps."""
+    """Create and return a run ID before invoking any pipeline steps.
+
+    If the caller supplies an open transaction, the insert commits with that transaction.
+    """
     if mode not in {"incremental", "backfill"}:
         raise ValueError("Run mode must be incremental or backfill")
     if mode == "backfill" and (start is None or end is None or start > end):
@@ -51,7 +54,10 @@ def finish_run(
     *,
     conn: psycopg.Connection | None = None,
 ) -> None:
-    """Set the final status and counters without overwriting a completed run."""
+    """Set the final status and counters without overwriting a completed run.
+
+    If the caller supplies an open transaction, the update commits with that transaction.
+    """
     if status not in {"success", "failed"}:
         raise ValueError("Final run status must be success or failed")
     counters = (counts.rows_fetched, counts.rows_valid, counts.rows_quarantined)

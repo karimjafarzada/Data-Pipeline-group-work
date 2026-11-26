@@ -1,7 +1,6 @@
 """Command-line entry point for one pipeline run or a reviewed quality release."""
 
 import argparse
-import getpass
 import logging
 from datetime import date
 from uuid import UUID
@@ -10,7 +9,7 @@ from pipeline.db import get_connection
 from pipeline.ingestion.ingest import ingest
 from pipeline.migrate import apply_migrations
 from pipeline.quality.gate import QualityGateError, run_quality_gate
-from pipeline.quality.release import ReleaseError, release_run
+from pipeline.quality.release import ACTIONS, RELEASE, ReleaseError, release_run
 from pipeline.quality.validate import validate
 from pipeline.runs import RunCounts, finish_run, start_run
 
@@ -20,7 +19,7 @@ RUN_LOCK_ID = 7_420_002
 
 def _publication_steps():
     from pipeline.gold import load_gold
-    from pipeline.silver import build_silver
+    from pipeline.silver.build import build_silver
 
     return build_silver, load_gold
 
@@ -50,12 +49,7 @@ def run_pipeline(mode: str, start: date | None = None, end: date | None = None) 
                 ingested.rows_fetched, validated.valid,
                 validated.invalid + ingested.rows_quarantined,
             )
-            try:
-                run_quality_gate(run_id, ingested, validated, conn=conn)
-            except QualityGateError as error:
-                result = error.result
-                counts = RunCounts(ingested.rows_fetched, result.checked - result.failed, result.failed)
-                raise
+            run_quality_gate(run_id, ingested, validated, conn=conn)
             build_silver(run_id)
             load_gold(run_id)
             finish_run(run_id, "success", counts, conn=conn)
@@ -71,7 +65,7 @@ def run_pipeline(mode: str, start: date | None = None, end: date | None = None) 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m pipeline", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="Run the full pipeline once")
@@ -79,10 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--start", type=date.fromisoformat, help="Inclusive backfill start date")
     run.add_argument("--end", type=date.fromisoformat, help="Inclusive backfill end date")
 
-    release = commands.add_parser("release", help="Release held records after investigation")
+    release = commands.add_parser("release", help="Release or recheck held records")
     release.add_argument("--run-id", type=UUID, required=True)
     release.add_argument("--note", required=True)
-    release.add_argument("--released-by", default=getpass.getuser(), help="Name of the investigator")
+    release.add_argument("--released-by", required=True, help="Name of the investigator")
+    release.add_argument("--action", choices=ACTIONS, default=RELEASE)
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -102,9 +97,12 @@ def main(argv: list[str] | None = None) -> int:
                 ).fetchone()[0]:
                     raise RuntimeError("A pipeline run or release is already in progress")
                 count = release_run(
-                    args.run_id, "release", released_by=args.released_by, note=args.note, conn=conn
+                    args.run_id, args.action, released_by=args.released_by, note=args.note, conn=conn
                 )
-            logger.info("Released %s rows for promotion by the next successful run", count)
+            if args.action == RELEASE:
+                logger.info("Released %s rows for promotion by the next successful run", count)
+            else:
+                logger.info("Queued %s rows for validation on the next run", count)
     except QualityGateError as error:
         logger.error("%s", error)
         return 2
