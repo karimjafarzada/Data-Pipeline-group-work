@@ -96,6 +96,42 @@ def db(empty_db):
 
 
 @pytest.fixture
+def crime_record():
+    """A real API record (fetched 2026-11-26) that passes every validation rule.
+
+    Each test gets its own copy, so tests can break it without affecting each other.
+    """
+    return {
+        "id": "14391668",
+        "case_number": "JK491439",
+        "date": "2026-11-16T10:30:00.000",
+        "block": "027XX W 73RD ST",
+        "iucr": "1320",
+        "primary_type": "CRIMINAL DAMAGE",
+        "description": "TO VEHICLE",
+        "location_description": "STREET",
+        "arrest": False,
+        "domestic": False,
+        "beat": "0831",
+        "district": "008",
+        "ward": "18",
+        "community_area": "66",
+        "fbi_code": "14",
+        "x_coordinate": "1159193",
+        "y_coordinate": "1856117",
+        "year": "2026",
+        "updated_on": "2026-11-24T15:44:55.000",
+        "latitude": "41.760905907",
+        "longitude": "-87.692113737",
+        "location": {
+            "latitude": "41.760905907",
+            "longitude": "-87.692113737",
+            "human_address": '{"address": "", "city": "", "state": "", "zip": ""}',
+        },
+    }
+
+
+@pytest.fixture
 def make_run(db):
     """Insert a row into ops.pipeline_runs (bronze rows need one) and return its run_id."""
 
