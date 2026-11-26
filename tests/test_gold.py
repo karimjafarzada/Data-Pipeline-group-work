@@ -112,7 +112,6 @@ def test_gold_loader_rejects_invalid_batch_size(db, make_run):
 
 def test_gold_loader_preserves_connection_autocommit(db, make_run):
     run_id = make_run()
-    db.commit()
     db.autocommit = False
     load_gold(run_id, conn=db)
     assert db.autocommit is False
