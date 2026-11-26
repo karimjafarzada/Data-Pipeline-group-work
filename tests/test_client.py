@@ -254,6 +254,73 @@ def test_iter_pages_stops_if_paging_does_not_move_forward(mocked_api, make_clien
         list(make_client(page_size=3).iter_pages(after_id=10))
 
 
+# --- paging by change (incremental) -----------------------------------------
+
+
+def changes(*pairs):
+    """Records with (updated_on, id), as the API returns them."""
+    return [{"id": str(id_), "updated_on": ts} for ts, id_ in pairs]
+
+
+def changes_matcher(ts, after_id, limit="2"):
+    return [
+        matchers.query_param_matcher(
+            {
+                "$limit": limit,
+                "$order": "updated_on,id",
+                "$where": f"updated_on > '{ts}' OR (updated_on = '{ts}' AND id > {after_id})",
+            }
+        )
+    ]
+
+
+T1 = "2025-01-01T15:40:23.000"
+T2 = "2025-01-02T08:00:00.000"
+
+
+def test_changes_page_orders_by_updated_on_then_id(mocked_api, client):
+    mocked_api.get(URL, json=changes((T1, 5)), match=changes_matcher(T1, 0, limit="5000"))
+
+    assert client.fetch_changes_page(T1) == changes((T1, 5))
+
+
+@pytest.mark.parametrize("bad", ["2025-01-01", "2025-01-01T00:00:00' OR 1=1 --", "yesterday"])
+def test_changes_page_rejects_a_bad_timestamp(client, bad):
+    with pytest.raises(ValueError, match="Not an API timestamp"):
+        client.fetch_changes_page(bad)
+
+
+def test_iter_changed_pages_continues_from_the_last_change(mocked_api, make_client):
+    # Two records share T1, so the id is needed to continue after the right one.
+    mocked_api.get(URL, json=changes((T1, 5), (T1, 9)), match=changes_matcher(T1, 0))
+    mocked_api.get(URL, json=changes((T2, 3)), match=changes_matcher(T1, 9))
+
+    pages = list(make_client(page_size=2).iter_changed_pages(T1))
+
+    assert pages == [changes((T1, 5), (T1, 9)), changes((T2, 3))]
+
+
+def test_iter_changed_pages_resumes_from_a_cursor(mocked_api, make_client):
+    mocked_api.get(URL, json=[], match=changes_matcher(T2, 3))
+
+    assert list(make_client(page_size=2).iter_changed_pages(T2, after_id=3)) == []
+
+
+def test_iter_changed_pages_stops_if_paging_does_not_move_forward(mocked_api, make_client):
+    # Ends at T1|9, which is not after the T2|3 we asked for.
+    mocked_api.get(URL, json=changes((T1, 5), (T1, 9)), match=changes_matcher(T2, 3))
+
+    with pytest.raises(ApiResponseError, match="did not move forward"):
+        list(make_client(page_size=2).iter_changed_pages(T2, after_id=3))
+
+
+def test_iter_changed_pages_needs_updated_on_on_the_last_record(mocked_api, make_client):
+    mocked_api.get(URL, json=[{"id": "5", "updated_on": T1}, {"id": "9"}])
+
+    with pytest.raises(ApiResponseError, match="no updated_on or id"):
+        list(make_client(page_size=2).iter_changed_pages(T1))
+
+
 # --- retries ----------------------------------------------------------------
 
 

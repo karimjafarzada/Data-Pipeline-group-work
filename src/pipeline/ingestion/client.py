@@ -1,7 +1,11 @@
 """HTTP client for the Chicago Crimes dataset on the Socrata (SODA) API.
 
-Pages are fetched with keyset paging: ordered by ``id`` and filtered with
-``id > <after_id>``, never with ``$offset`` (see CLAUDE.md, "API notes").
+Pages are fetched with keyset paging, never with ``$offset`` (see CLAUDE.md, "API notes"):
+
+- ``iter_pages`` (backfill): ordered by ``id``, filtered with ``id > <after_id>``.
+- ``iter_changed_pages`` (incremental): ordered by ``updated_on, id``, filtered with
+  ``updated_on > <ts> OR (updated_on = <ts> AND id > <after_id>)``. This finds new
+  records and records changed since the cursor; ``id`` breaks ties in ``updated_on``.
 """
 
 from __future__ import annotations
@@ -9,9 +13,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import time
 from collections.abc import Callable, Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import requests
@@ -33,6 +38,8 @@ DEFAULT_MAX_ATTEMPTS = 5
 MAX_BACKOFF_SECONDS = 30.0
 # A Retry-After longer than this is cut down, so one header can't stall a run.
 MAX_RETRY_AFTER_SECONDS = 60.0
+# The API's timestamp format (no timezone), e.g. 2025-01-01T15:40:23.000
+API_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?$")
 
 Record = dict[str, Any]
 
@@ -104,6 +111,25 @@ def build_query_params(
     return params
 
 
+def build_changes_query_params(limit: int, updated_after: str, after_id: int | str = 0) -> dict[str, str]:
+    """Build the SoQL query parameters for one page of records changed after a cursor.
+
+    ``updated_after`` is a raw API timestamp, used exactly as the API returned it.
+    """
+    if not API_TIMESTAMP_PATTERN.match(updated_after):
+        # Also stops anything other than a timestamp reaching the query.
+        raise ValueError(f"Not an API timestamp: {updated_after!r}")
+    last_id = int(after_id)
+    return {
+        "$limit": str(limit),
+        "$order": "updated_on,id",
+        "$where": (
+            f"updated_on > '{updated_after}'"
+            f" OR (updated_on = '{updated_after}' AND id > {last_id})"
+        ),
+    }
+
+
 class SocrataClient:
     """Fetches pages of crime records from the Socrata API."""
 
@@ -155,7 +181,25 @@ class SocrataClient:
         if limit is None:
             limit = self.page_size
         params = build_query_params(limit, after_id, start_date, end_date)
+        rows = self._fetch(params)
+        logger.info("Fetched page after_id=%s rows=%d", after_id, len(rows))
+        return rows
 
+    def fetch_changes_page(
+        self, updated_after: str, after_id: int | str = 0, limit: int | None = None
+    ) -> list[Record]:
+        """Fetch one page of records changed after (updated_after, after_id)."""
+        if limit is None:
+            limit = self.page_size
+        params = build_changes_query_params(limit, updated_after, after_id)
+        rows = self._fetch(params)
+        logger.info(
+            "Fetched changes page after=%s|%s rows=%d", updated_after, after_id, len(rows)
+        )
+        return rows
+
+    def _fetch(self, params: dict[str, str]) -> list[Record]:
+        """Send the request with retries and return the parsed list of records."""
         retrying = Retrying(
             retry=retry_if_exception_type(RETRYABLE_ERRORS),
             stop=stop_after_attempt(self.max_attempts),
@@ -166,10 +210,7 @@ class SocrataClient:
             reraise=True,
         )
         response = retrying(self._get, params)
-
-        rows = _parse_records(response)
-        logger.info("Fetched page after_id=%s rows=%d", after_id, len(rows))
-        return rows
+        return _parse_records(response)
 
     def iter_pages(
         self,
@@ -192,6 +233,24 @@ class SocrataClient:
             if len(page) < limit:
                 return
             after_id = _next_after_id(page, after_id)
+
+    def iter_changed_pages(
+        self, updated_after: str, after_id: int | str = 0, limit: int | None = None
+    ) -> Iterator[list[Record]]:
+        """Yield pages of records changed after (updated_after, after_id), oldest change first.
+
+        Stops when a page comes back short. Empty pages are not yielded.
+        """
+        if limit is None:
+            limit = self.page_size
+
+        while True:
+            page = self.fetch_changes_page(updated_after, after_id, limit)
+            if page:
+                yield page
+            if len(page) < limit:
+                return
+            updated_after, after_id = _next_change_cursor(page, (updated_after, after_id))
 
     def _get(self, params: dict[str, str]) -> requests.Response:
         """Send one request and turn a bad status code into the matching error."""
@@ -242,18 +301,47 @@ def _parse_retry_after(value: str | None) -> float | None:
     return seconds
 
 
-def _next_after_id(page: list[Record], previous: int | str | None) -> int:
-    """The highest id on the page: where the next page starts."""
+def page_max_id(page: list[Record]) -> int:
+    """The highest id on a page (records without an id are ignored)."""
     ids = [int(record["id"]) for record in page if "id" in record]
     if not ids:
-        raise ApiResponseError("A full page has no record ids, so paging can't continue")
-    next_id = max(ids)
+        raise ApiResponseError("The page has no record ids, so paging can't continue")
+    return max(ids)
+
+
+def page_last_change(page: list[Record]) -> tuple[str, int]:
+    """(updated_on, id) of the last record on a page ordered by updated_on, id."""
+    last = page[-1]
+    if "updated_on" not in last or "id" not in last:
+        raise ApiResponseError(
+            "The last record on the page has no updated_on or id, so paging can't continue"
+        )
+    return last["updated_on"], int(last["id"])
+
+
+def _next_after_id(page: list[Record], previous: int | str | None) -> int:
+    """The highest id on the page: where the next page starts."""
+    next_id = page_max_id(page)
     # The API should only return ids above `previous`; stop rather than loop forever.
     if previous is not None and next_id <= int(previous):
         raise ApiResponseError(
             f"Paging did not move forward (after_id {previous}, page max id {next_id})"
         )
     return next_id
+
+
+def _next_change_cursor(page: list[Record], previous: tuple[str, int | str]) -> tuple[str, int]:
+    """(updated_on, id) of the page's last record: where the next page starts."""
+    updated_on, last_id = page_last_change(page)
+    # Compare as datetimes, because '...:23' and '...:23.000' are the same moment.
+    new_position = (datetime.fromisoformat(updated_on), last_id)
+    old_position = (datetime.fromisoformat(previous[0]), int(previous[1]))
+    if new_position <= old_position:
+        raise ApiResponseError(
+            f"Paging did not move forward (after {previous[0]}|{previous[1]},"
+            f" page ends at {updated_on}|{last_id})"
+        )
+    return updated_on, last_id
 
 
 def _parse_records(response: requests.Response) -> list[Record]:
