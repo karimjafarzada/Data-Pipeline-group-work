@@ -39,6 +39,13 @@ jobs:
         run: |
           python -m pipeline.migrate
           python -m pytest -ra
+      - name: Verify pipeline image and migration entry point
+        run: |
+          docker compose build pipeline
+          test "$(docker compose run --rm --no-deps pipeline id -u)" = 10001
+          docker compose run --rm pipeline python -m pipeline --help
+          docker compose run --rm pipeline python -c 'from pipeline.migrate import find_migrations; assert find_migrations()'
+          docker compose run --rm pipeline python -m pipeline.migrate
       - name: Show server logs on failure
         if: failure()
         run: docker compose logs db
