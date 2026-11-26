@@ -29,6 +29,7 @@ from pipeline.ingestion.checkpoint import (
     save_checkpoint,
 )
 from pipeline.ingestion.client import DATASET_ID, SocrataClient, page_last_change, page_max_id
+from pipeline.ingestion.schema_check import check_api_schema, record_unexpected_keys
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +115,18 @@ def _ingest_pages(
         pages, cursor_after = _backfill_pages(client, start, end, cursor)
     else:
         pages, cursor_after = _incremental_pages(conn, client, cursor)
+    # `pages` is a generator: nothing has been fetched yet. Check the API's columns
+    # first; a removed or retyped column that silver uses stops the run here.
+    check_api_schema(run_id, conn=conn, client=client)
     logger.info("Ingesting %s from checkpoint %s", key, cursor)
 
     stats = IngestStats(cursor=cursor)
+    unexpected_keys: set[str] = set()  # record keys already reported in this run
     for page in pages:  # the API call for the next page happens outside any transaction
         new_cursor = cursor_after(page)
         with conn.transaction():  # page and checkpoint: both saved, or neither
             result = write_page(conn, run_id, DATASET_ID, page)
+            record_unexpected_keys(conn, run_id, page, unexpected_keys)
             save_checkpoint(conn, key, new_cursor, run_id)
 
         stats.pages += 1
