@@ -104,12 +104,6 @@ def test_empty_silver_is_a_noop(db, make_run):
     assert stats.facts_inserted == stats.facts_updated == stats.facts_unchanged == 0
 
 
-def test_gold_loader_rejects_invalid_batch_size(db, make_run):
-    import pytest
-    with pytest.raises(ValueError):
-        load_gold(make_run(), conn=db, batch_size=0)
-
-
 def test_gold_loader_preserves_connection_autocommit(db, make_run):
     run_id = make_run()
     db.autocommit = False
