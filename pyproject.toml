@@ -9,6 +9,7 @@ description = "Chicago crimes data pipeline: Socrata API to PostgreSQL bronze/si
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.2",
+    "pydantic>=2.9",
     "requests>=2.32",
     "tenacity>=9.0",
 ]
