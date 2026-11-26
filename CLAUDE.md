@@ -55,7 +55,24 @@ orchestration / run tracking (Student 3) without asking first.
 
 ### Schemas
 `bronze`, `silver`, `gold`, and `ops` (pipeline bookkeeping).
-Migration order: `ops` first, because bronze references `ops.pipeline_runs`.
+Migration order: `ops` first, because bronze references `ops.pipeline_runs` (see "Migrations").
+
+### Migrations
+- SQL files live in `migrations/`, named `<UTC timestamp>_<description>.sql`: 14 digits, then
+  lowercase letters, digits and underscores, e.g. `20261126101100_bronze_raw_records.sql`.
+  Take the timestamp from `date -u +%Y%m%d%H%M%S` when you create the file, so teammates
+  never pick the same name. Any other name makes the runner stop with an error.
+- Files are applied in name order, so a table must be created by an older file than any file
+  that references it. `ops.pipeline_runs` (Student 3) must sort before `20261126101100`,
+  e.g. `20261126000000_ops_pipeline_runs.sql`, because bronze, checkpoint and quarantine reference it.
+- Apply them with `python -m pipeline.migrate` (reads the `POSTGRES_*` variables). Each file
+  runs once, in its own transaction, together with its row in
+  `ops.schema_migrations (filename, applied_at)`, so a failed file leaves no trace and running
+  the command again applies only new files. An advisory lock stops two runners at once.
+- Never edit a migration that has been applied anywhere; add a new file instead.
+  Don't put `BEGIN` / `COMMIT` in migration files.
+- Tests apply every migration to a fresh throwaway database. Until Student 3's `pipeline_runs`
+  migration exists, they first load the test-only copy in `tests/sql/ops_pipeline_runs_stub.sql`.
 
 ### run_id
 - A UUID created once at the start of every run by `start_run()` (owner: Student 3).
