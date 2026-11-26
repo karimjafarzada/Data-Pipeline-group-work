@@ -36,7 +36,6 @@ WITH district_stats AS (
            count(*) FILTER (WHERE f.arrest) AS arrests
     FROM gold.fact_crimes f
     JOIN gold.dim_location l USING (location_key)
-    WHERE l.is_current
     GROUP BY l.district
 )
 SELECT district, crime_count, arrests,
