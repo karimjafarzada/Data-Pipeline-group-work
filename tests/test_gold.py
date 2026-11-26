@@ -148,3 +148,38 @@ def test_same_timestamp_higher_bronze_id_updates_fact_and_lineage(db, make_run):
     ).fetchone()
     assert stats.facts_updated == 1
     assert fact == (True, corrected_bronze_id, corrected_silver_run)
+
+
+def test_same_timestamp_location_change_rekeys_unchanged_fact(db, make_run):
+    insert_silver(db, make_run(), crime_id=1001, ward=18)
+    load_gold(make_run(), conn=db)
+    original = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+
+    insert_silver(db, make_run(), crime_id=1002, ward=19)
+    second_stats = load_gold(make_run(), conn=db)
+    updated = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+    assert updated[0] != original[0]
+    assert updated[1:] == original[1:]
+    assert second_stats.facts_updated == 1
+    assert db.execute("""
+        SELECT count(*) FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE f.crime_id = 1001
+          AND f.source_updated_at >= d.valid_from
+          AND f.source_updated_at < d.valid_to
+    """).fetchone()[0] == 1
+
+    third_stats = load_gold(make_run(), conn=db)
+    unchanged = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+    assert unchanged == updated
+    assert third_stats.facts_updated == third_stats.facts_inserted == 0
+    assert third_stats.facts_unchanged == 2
