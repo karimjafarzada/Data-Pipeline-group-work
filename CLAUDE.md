@@ -77,7 +77,9 @@ Migration order: `ops` first, because bronze references `ops.pipeline_runs` (see
 ### run_id
 - A UUID created once at the start of every run by `start_run()` (owner: Student 3).
 - It is inserted into `ops.pipeline_runs` with status `running` before any data is fetched.
-- It is passed explicitly to every step: `ingest(run_id, ...)`, `validate(run_id)`, `build_silver(run_id)`, gold loading.
+- It is passed explicitly to every step, which run in this order:
+  `ingest(run_id, ...)` → `validate(run_id)` → `run_quality_gate(run_id, ...)` → `build_silver(run_id)` → `load_gold(run_id)`.
+  If a step raises, the steps after it don't run.
 - Every row written to bronze, quarantine and silver stores the `run_id` that wrote it.
 - At the end, `finish_run()` sets status `success` or `failed` with counts and the error message.
 
@@ -111,7 +113,9 @@ CREATE TABLE bronze.raw_records (
     run_id             UUID        NOT NULL REFERENCES ops.pipeline_runs (run_id),
     validation_status  TEXT        NOT NULL DEFAULT 'pending'
                        CHECK (validation_status IN ('pending', 'valid', 'invalid')),
-    UNIQUE (endpoint, source_id, payload_hash)
+    validated_run_id   UUID REFERENCES ops.pipeline_runs (run_id),  -- the run whose validate() checked it
+    UNIQUE (endpoint, source_id, payload_hash),
+    CHECK ((validation_status = 'pending') = (validated_run_id IS NULL))
 );
 
 -- Owner: Student 1
@@ -135,6 +139,28 @@ CREATE TABLE ops.quarantine (
     quarantined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (payload_hash, rule_name)
 );
+
+-- Owner: Student 1. One row per run: the gate's decision, and a person's release of a held run.
+CREATE TABLE ops.quality_gate_results (
+    run_id          UUID PRIMARY KEY REFERENCES ops.pipeline_runs (run_id),
+    checked         INTEGER,      -- decision (run_quality_gate); all five NULL only when the run
+    failed          INTEGER,      -- never reached the gate and release_run() made the row
+    failure_rate    NUMERIC GENERATED ALWAYS AS (failed / checked, 0 when checked = 0) STORED,
+    threshold       NUMERIC,
+    passed          BOOLEAN,
+    decided_at      TIMESTAMPTZ,
+    release_action  TEXT CHECK (release_action IN ('release', 'recheck')),  -- release (release_run)
+    released_by     TEXT,
+    release_note    TEXT,
+    released_at     TIMESTAMPTZ
+);
+-- Exact constraints: migrations/20261126105728_quality_gate.sql.
+
+-- Owner: Student 1. The only bronze rows build_silver() may promote.
+CREATE VIEW bronze.promotable_records AS  -- same columns as bronze.raw_records
+SELECT r.* FROM bronze.raw_records r
+JOIN ops.quality_gate_results g ON g.run_id = r.validated_run_id
+WHERE r.validation_status = 'valid' AND (g.passed OR g.release_action = 'release');
 
 -- Owner: Student 1
 CREATE TABLE ops.api_schema_changes (
@@ -196,14 +222,15 @@ as a hex string. The same function is used for bronze and quarantine.
   On startup, ingestion resumes from the checkpoint.
 - Incremental and backfill runs use separate checkpoint keys and never overwrite each other.
 - `validate(run_id)` checks **every** bronze row with `validation_status = 'pending'`, not only
-  this run's rows, so rows left by a crashed run are picked up. Each row becomes `valid` or `invalid`.
+  this run's rows, so rows left by a crashed run are picked up. Each row becomes `valid` or `invalid`,
+  and `validated_run_id` is set to the run that checked it, in the same update.
 - Quarantine insert: one row per broken rule, `ON CONFLICT (payload_hash, rule_name) DO NOTHING`.
-- `build_silver(run_id)`: for each `source_id`, take the newest bronze row with
-  `validation_status = 'valid'` (by `source_updated_at`, then bronze `id`) and upsert it with
+- `build_silver(run_id)`: reads **only** `bronze.promotable_records`: valid rows whose validating
+  run passed the quality gate or was released (see "Quality gate"). For each `source_id`, take the
+  newest promotable row (by `source_updated_at`, then bronze `id`) and upsert it with
   `ON CONFLICT (id) DO UPDATE ... WHERE silver.crimes.source_updated_at <= EXCLUDED.source_updated_at`.
-  It promotes every valid row not yet in silver, so valid rows from a run that failed the quality
-  gate reach silver on the next successful run. If a record's newest version is invalid,
-  silver keeps its last valid version.
+  Valid rows of a run that failed the gate are **held**: no later run publishes them until a person
+  releases them. If a record's newest version is invalid or held, silver keeps its last promotable version.
 
 ### Validation rules (extend after profiling the data)
 Code: `pipeline/quality/rules.py`. Each rule gives at most one quarantine row per record;
@@ -227,8 +254,10 @@ skip values that don't parse, so one bad value is reported once. A blank string 
 `CrimeRecord` (Pydantic) is the typed shape of a valid record, field for field the same as `silver.crimes`.
 
 ### Quality gate
-- Runs at the end of `validate(run_id)`:
-  failure rate = `rows_quarantined / (rows_valid + rows_quarantined)` for this run.
+Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
+- A separate step after `validate()`: `run_quality_gate(run_id, ingest_stats, validation_stats, *, conn=None, threshold=None)`.
+  `check_quality_gate(ingest_stats, validation_stats, threshold)` is the same check without the database.
+- failure rate = `rows_quarantined / (rows_valid + rows_quarantined)` for this run.
   Both count distinct records, so a record breaking two rules counts once.
 - The rate is based on the rows actually checked, **not** on `rows_fetched`, because `validate()`
   also checks pending rows left by earlier runs, and `rows_fetched` includes records bronze already had:
@@ -236,10 +265,28 @@ skip values that don't parse, so one bad value is reported once. A blank string 
   where `IngestStats.rows_quarantined` is the `missing_source_id` records that never reached bronze.
   The same sums go into `ops.pipeline_runs`: `rows_valid = ValidationStats.valid`,
   `rows_quarantined = ValidationStats.invalid + IngestStats.rows_quarantined`.
-- If nothing was checked (zero records), the gate passes.
-- If the rate exceeds `QUALITY_MAX_FAILURE_RATE` (default `0.05`), raise `QualityGateError`.
-- Then the run is marked `failed` and silver and gold are **not** touched for that run.
+- If nothing was checked (zero records), the gate passes. Zero records in bronze but some
+  `missing_source_id` records gives a rate of 100%, which fails.
+- "Exceeds" means **strictly greater**: a rate equal to the threshold passes (1 in 20 at `0.05` passes).
+  The rate and threshold are compared as exact fractions, not floats.
+- `QUALITY_MAX_FAILURE_RATE` (default `0.05`; unset or blank means the default) must be a number from
+  0 to 1, otherwise `ValueError`. 0 fails on any failure; 1 never fails.
+- The default assumes **daily runs** (several hundred records each; 2015-06 had 23,203 records and a
+  0% failure rate). There is no minimum run size, so in much smaller runs (e.g. hourly) a single
+  broken record can exceed 5%; revisit the threshold if runs become more frequent.
+- The decision is written to `ops.quality_gate_results` **before** raising. If the rate exceeds the
+  threshold, `QualityGateError` is raised (its `result` holds the numbers), the run is marked
+  `failed`, and silver and gold are **not** touched for that run.
   Bronze and quarantine keep their rows, so the failure can be investigated.
+- A failed run's valid rows stay **held** (not in `bronze.promotable_records`), so a later successful
+  run can't publish them. The same goes for a run that crashed after `validate()` and never reached
+  the gate. After investigating, a person calls
+  `release_run(run_id, action, released_by=..., note=...)`, once per run:
+  - `release`: the rows are fine; the next successful run's `build_silver()` promotes them.
+  - `recheck`: a rule was missing; after adding it, the run's valid rows go back to `pending`, so
+    the next run validates them under the new rules and its gate counts them.
+
+  It raises `ReleaseError` for a run that passed, was already released or rechecked, or has no held rows.
 
 ### API change detection
 - `check_api_schema(run_id)` runs at the start of `ingest()`, before any data is fetched. It reads the
@@ -260,7 +307,9 @@ skip values that don't parse, so one bad value is reported once. A blank string 
 | `finish_run(run_id, status, counts, error=None)` | `pipeline/runs.py` | Student 3 |
 | `ingest(run_id, mode, start=None, end=None) -> IngestStats` | `pipeline/ingestion/` | Student 1 |
 | `check_api_schema(run_id) -> list[SchemaChange]` (raises `ApiSchemaChangeError`) | `pipeline/ingestion/` | Student 1 |
-| `validate(run_id) -> ValidationStats` (raises `QualityGateError`) | `pipeline/quality/` | Student 1 |
+| `validate(run_id) -> ValidationStats` | `pipeline/quality/` | Student 1 |
+| `run_quality_gate(run_id, ingest_stats, validation_stats) -> GateResult` (raises `QualityGateError`) | `pipeline/quality/gate.py` | Student 1 |
+| `release_run(run_id, action, *, released_by, note) -> int` (raises `ReleaseError`) | `pipeline/quality/release.py` | Student 1 |
 | `build_silver(run_id)` | `pipeline/silver/` | Student 1 |
 | `load_gold(run_id)` | `pipeline/gold/` | Student 2 |
 
@@ -283,3 +332,7 @@ Real values live in `.env` (gitignored); `.env.example` lists the names with dum
 - Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN`, `QUALITY_MAX_FAILURE_RATE` and
   `API_INCREMENTAL_TIMEOUT_SECONDS` to `.env.example`.
 - README does not list team members yet.
+- The CLI must call `run_quality_gate(run_id, ingest_stats, validation_stats)` between `validate()` and
+  `build_silver()` (see "run_id"), and on `QualityGateError` call `finish_run(..., 'failed', ...)` with
+  `rows_valid = ValidationStats.valid` and `rows_quarantined = GateResult.failed`.
+- Whether to add a CLI command for `release_run()` is still to be agreed.
