@@ -15,9 +15,6 @@ from uuid import UUID
 import psycopg
 
 logger = logging.getLogger(__name__)
-DEFAULT_BATCH_SIZE = 10_000
-
-
 class GoldLoadError(RuntimeError):
     """Gold load could not acquire its transaction-scoped lock."""
 
@@ -39,11 +36,8 @@ def load_gold(
     run_id: UUID,
     *,
     conn: psycopg.Connection | None = None,
-    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> GoldStats:
     """Load Silver's current snapshot into Gold in one transaction."""
-    if batch_size < 1:
-        raise ValueError("batch_size must be at least 1")
     owns_conn = conn is None
     if conn is None:
         settings = _connection_settings_from_env()
@@ -53,7 +47,7 @@ def load_gold(
     try:
         conn.autocommit = True
         with conn.transaction():
-            stats = _load(conn, run_id, batch_size)
+            stats = _load(conn, run_id)
     finally:
         if owns_conn:
             conn.close()
@@ -64,7 +58,7 @@ def load_gold(
     return stats
 
 
-def _load(conn: psycopg.Connection, run_id: UUID, batch_size: int) -> GoldStats:
+def _load(conn: psycopg.Connection, run_id: UUID) -> GoldStats:
     if not conn.execute(
         "SELECT pg_try_advisory_xact_lock(hashtext('load_gold'))"
     ).fetchone()[0]:
