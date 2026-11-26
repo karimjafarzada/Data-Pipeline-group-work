@@ -108,7 +108,8 @@ def check_api_schema(
     if changes:
         owns_conn = conn is None
         if conn is None:
-            from pipeline.db import get_connection  # Student 3's module, not on main yet
+            # Student 3's module, not on main yet.
+            from pipeline.db import get_connection
 
             conn = get_connection()
         try:
