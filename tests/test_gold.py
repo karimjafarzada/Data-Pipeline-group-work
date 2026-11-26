@@ -5,7 +5,8 @@ from pipeline.gold.load import load_gold
 
 
 def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
-                  ward=18, community_area=66, updated="2026-11-24 15:44:55+00"):
+                  ward=18, community_area=66, updated="2026-11-24 15:44:55+00",
+                  arrest=False):
     bronze_id = db.execute("""
         INSERT INTO bronze.raw_records
             (endpoint, source_id, payload, payload_hash, run_id)
@@ -22,6 +23,8 @@ def insert_silver(db, run_id, *, description="TO VEHICLE", district="008",
                 %s::timestamptz, %s, %s)
         ON CONFLICT (id) DO UPDATE SET
             description = EXCLUDED.description,
+            arrest = EXCLUDED.arrest,
+            bronze_id = EXCLUDED.bronze_id,
             district = EXCLUDED.district,
             ward = EXCLUDED.ward,
             community_area = EXCLUDED.community_area,
@@ -125,3 +128,23 @@ def test_analytical_sql_runs_against_fixture_data(db, make_run):
     for statement in query_file.read_text(encoding="utf-8").split(";"):
         if statement.strip():
             db.execute(statement)
+
+
+def test_same_timestamp_higher_bronze_id_updates_fact_and_lineage(db, make_run):
+    first_silver_run = make_run()
+    insert_silver(db, first_silver_run, arrest=False)
+    load_gold(make_run(), conn=db)
+
+    corrected_silver_run = make_run()
+    insert_silver(db, corrected_silver_run, arrest=True)  # identical source_updated_at
+    corrected_bronze_id = db.execute(
+        "SELECT bronze_id FROM silver.crimes WHERE id = 1001"
+    ).fetchone()[0]
+
+    stats = load_gold(make_run(), conn=db)
+
+    fact = db.execute(
+        "SELECT arrest, bronze_id, silver_run_id FROM gold.fact_crimes WHERE crime_id = 1001"
+    ).fetchone()
+    assert stats.facts_updated == 1
+    assert fact == (True, corrected_bronze_id, corrected_silver_run)
