@@ -68,3 +68,10 @@ test "$(sql malformed_demo "SELECT status || ':' || rows_fetched || ':' || rows_
 test "$(sql malformed_demo "SELECT count(*) FROM bronze.promotable_records")" = 0
 test "$(sql malformed_demo "SELECT count(*) FROM ops.quarantine")" = 8
 echo "QUALITY GATE: failed:20:13:7; 8 rule violations; 0 promotable rows"
+
+run_id="$(sql malformed_demo "SELECT run_id FROM ops.pipeline_runs")"
+"${compose[@]}" run --rm --no-deps -e POSTGRES_DB=malformed_demo pipeline \
+    python -m pipeline release --run-id "$run_id" --released-by "recovery-demo" --note "Tested release"
+test "$(sql malformed_demo "SELECT count(*) FROM bronze.promotable_records")" = 13
+test "$(sql malformed_demo "SELECT released_by || ':' || release_note FROM ops.quality_gate_results")" = "recovery-demo:Tested release"
+echo "RELEASE: 13 valid rows are eligible for later promotion and audit details are saved"
