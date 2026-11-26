@@ -205,20 +205,37 @@ as a hex string. The same function is used for bronze and quarantine.
   gate reach silver on the next successful run. If a record's newest version is invalid,
   silver keeps its last valid version.
 
-### Validation rules (initial set; extend after profiling the data)
+### Validation rules (extend after profiling the data)
+Code: `pipeline/quality/rules.py`. Each rule gives at most one quarantine row per record;
+several problems for the same rule are joined into one `reason`. A missing key fails only
+`missing_required_field`; the other rules skip missing values, and rules that compare two fields
+skip values that don't parse, so one bad value is reported once. A blank string counts as missing.
+
 | Rule | Fails when |
 |---|---|
 | `missing_source_id` | no `id` (checked at ingestion) |
 | `missing_required_field` | any of `case_number`, `date`, `iucr`, `primary_type`, `arrest`, `domestic`, `year`, `updated_on` is missing |
 | `invalid_timestamp` | `date` or `updated_on` does not parse, or `date` is in the future |
-| `invalid_number` | `id`, `ward`, `community_area`, `year` or a coordinate is present but not numeric |
+| `invalid_number` | `id`, `ward`, `community_area` or `year` is present but not an integer, or a coordinate (`x_coordinate`, `y_coordinate`, `latitude`, `longitude`) is present but not a finite number |
+| `invalid_boolean` | `arrest` or `domestic` is present but not a JSON `true` / `false` |
 | `year_mismatch` | `year` differs from the year of `date` |
+| `coordinates_incomplete` | only one of `latitude` / `longitude` is present |
 | `coordinates_out_of_range` | latitude outside 41.6–42.1 or longitude outside −88.0 to −87.5 (when present) |
+| `updated_before_date` | `updated_on` is earlier than `date` |
+| `model_mismatch` | the record passes every rule above but still doesn't fit `CrimeRecord` (`pipeline/quality/model.py`), which means a rule is missing |
+
+`CrimeRecord` (Pydantic) is the typed shape of a valid record, field for field the same as `silver.crimes`.
 
 ### Quality gate
 - Runs at the end of `validate(run_id)`:
   failure rate = `rows_quarantined / (rows_valid + rows_quarantined)` for this run.
   Both count distinct records, so a record breaking two rules counts once.
+- The rate is based on the rows actually checked, **not** on `rows_fetched`, because `validate()`
+  also checks pending rows left by earlier runs, and `rows_fetched` includes records bronze already had:
+  `(ValidationStats.invalid + IngestStats.rows_quarantined) / (ValidationStats.checked + IngestStats.rows_quarantined)`,
+  where `IngestStats.rows_quarantined` is the `missing_source_id` records that never reached bronze.
+  The same sums go into `ops.pipeline_runs`: `rows_valid = ValidationStats.valid`,
+  `rows_quarantined = ValidationStats.invalid + IngestStats.rows_quarantined`.
 - If nothing was checked (zero records), the gate passes.
 - If the rate exceeds `QUALITY_MAX_FAILURE_RATE` (default `0.05`), raise `QualityGateError`.
 - Then the run is marked `failed` and silver and gold are **not** touched for that run.

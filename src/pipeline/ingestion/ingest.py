@@ -87,10 +87,10 @@ def ingest(
         if owns_conn:
             conn.close()
         else:
-            _restore_autocommit(conn, original_autocommit)
+            restore_autocommit(conn, original_autocommit)
 
 
-def _restore_autocommit(conn: psycopg.Connection, value: bool) -> None:
+def restore_autocommit(conn: psycopg.Connection, value: bool) -> None:
     if conn.closed or conn.autocommit == value:
         return
     try:
