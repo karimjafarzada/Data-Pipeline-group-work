@@ -1,13 +1,14 @@
 from datetime import date
 from decimal import Decimal
-from types import ModuleType
 from uuid import uuid4
 
 import pytest
 
 from pipeline import __main__ as cli
 from pipeline.db import get_connection
-from pipeline.ingestion.ingest import IngestStats
+from pipeline.gold.load import load_gold
+from pipeline.ingestion.expected_schema import expected_columns
+from pipeline.ingestion.ingest import IngestStats, ingest
 from pipeline.quality.gate import GateResult, QualityGateError
 from pipeline.quality.validate import ValidationStats
 from pipeline.runs import start_run
@@ -81,18 +82,33 @@ def test_cli_saves_quality_counts_and_stops_before_publication(use_test_database
         ).fetchone() == ("failed", 20, 13, 7)
 
 
-
-def test_publication_steps_imports_the_real_silver_loader(monkeypatch):
-    import sys
-
-    gold = ModuleType("pipeline.gold")
-
-    def load_gold(run_id):
-        return run_id
-
-    gold.load_gold = load_gold
-    monkeypatch.setitem(sys.modules, "pipeline.gold", gold)
+def test_publication_steps_imports_the_real_loaders():
     assert cli._publication_steps() == (build_silver, load_gold)
+
+
+def test_cli_backfill_publishes_to_silver_and_gold(use_test_database, monkeypatch, crime_record):
+    class FixtureClient:
+        def fetch_columns(self):
+            return expected_columns()
+
+        def iter_pages(self, *, start_date, end_date, after_id):
+            yield [crime_record]
+
+    def ingest_fixture(run_id, mode, start, end, *, conn):
+        return ingest(run_id, mode, start, end, conn=conn, client=FixtureClient())
+
+    monkeypatch.setattr(cli, "ingest", ingest_fixture)
+    day = crime_record["date"].split("T")[0]
+    assert cli.main(["run", "--mode", "backfill", "--start", day, "--end", day]) == 0
+
+    db = use_test_database
+    result = db.execute(
+        """SELECT r.status, r.rows_valid, g.crime_id
+           FROM ops.pipeline_runs r
+           JOIN silver.crimes s ON s.run_id = r.run_id
+           JOIN gold.fact_crimes g ON g.run_id = r.run_id AND g.crime_id = s.id"""
+    ).fetchall()
+    assert result == [("success", 1, int(crime_record["id"]))]
 
 
 def test_release_requires_investigator():

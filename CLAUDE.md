@@ -337,7 +337,7 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 | `run_quality_gate(run_id, ingest_stats, validation_stats) -> GateResult` (raises `QualityGateError`) | `pipeline/quality/gate.py` | Student 1 |
 | `release_run(run_id, action, *, released_by, note) -> int` (raises `ReleaseError`) | `pipeline/quality/release.py` | Student 1 |
 | `build_silver(run_id) -> SilverStats` (raises `SilverBuildError`) | `pipeline/silver/build.py` | Student 1 |
-| `load_gold(run_id)` | `pipeline/gold/` | Student 2 |
+| `load_gold(run_id)` | `pipeline/gold/load.py` | Student 2 |
 
 CLI entrypoint (scheduled by Student 3):
 `python -m pipeline run --mode incremental`
@@ -353,10 +353,6 @@ requests, which are slow on the API's side; backfill requests use 30 seconds).
 Real values live in `.env` (gitignored); `.env.example` lists the names with dummy values.
 
 ## Open items (owner: Student 3)
-- `compose.yaml` on `feat/docker-postgres` uses `POSTGRES_PORT` for the published host port (5433).
-  That clashes with the meaning above; rename the published one (e.g. `POSTGRES_HOST_PORT`).
-- Add `POSTGRES_HOST`, `API_BASE_URL`, `SOCRATA_APP_TOKEN`, `QUALITY_MAX_FAILURE_RATE` and
-  `API_INCREMENTAL_TIMEOUT_SECONDS` to `.env.example`.
 - README does not list team members yet.
 - The CLI must call `run_quality_gate(run_id, ingest_stats, validation_stats)` between `validate()` and
   `build_silver()` (see "run_id"), and on `QualityGateError` call `finish_run(..., 'failed', ...)` with
