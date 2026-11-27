@@ -14,6 +14,13 @@
 --   values that don't parse.
 -- Timestamps are parsed by PostgreSQL here and by Python there, so this is an
 -- independent second opinion, not a copy of the same code.
+--
+-- The two parsers don't accept the same strings. Python's datetime.fromisoformat()
+-- takes only ISO 8601; PostgreSQL's ::timestamp also takes e.g. 'yesterday', 'now',
+-- 'epoch', 'infinity', '06/09/2024' and 'June 9 2024'. On such values the verdicts can
+-- differ: for date = 'yesterday', validate() reports invalid_timestamp and this check
+-- accepts it. Agreement here means agreement on the data it was run on, not on every
+-- possible input.
 
 WITH parsed AS (
     SELECT

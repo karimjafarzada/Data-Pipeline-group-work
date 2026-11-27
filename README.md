@@ -114,8 +114,15 @@ Result on all 1,231,534 bronze records (about 20 seconds):
 | `coordinates_out_of_range` | 2 | 2 | yes |
 | each of the other 7 rules | 0 | 0 | yes |
 
-There are no records on which the two disagree.
+On these records, the two never disagree.
 
 Agreement on clean data would also hold for a check that never fires, so the same query was run on the test fixture `tests/fixtures/malformed_batch.json` (20 real records, 7 deliberately broken). It found exactly the 8 expected rule hits, one for each rule, and the same 7 invalid and 13 valid records as the Python rules.
+
+**What this shows, and what it doesn't.** The two agree on the data and the fixture above. That doesn't prove they agree on every possible input, because the timestamp parsers differ:
+
+- Python's `datetime.fromisoformat()` accepts only ISO 8601 strings.
+- PostgreSQL's `::timestamp` also accepts other forms, for example `yesterday`, `now`, `epoch`, `infinity`, `06/09/2024` and `June 9 2024`.
+
+On values like these the two can reach different verdicts. For example, for `"date": "yesterday"`, `validate` reports `invalid_timestamp`, while the SQL check reads it as a valid date. Every timestamp the API has sent so far is in ISO form (`2024-06-09T18:30:00.000`), so this hasn't happened on real data. If the two ever disagree, `validate` is the one the pipeline uses.
 
 `missing_source_id` and `model_mismatch` aren't part of this check. The first happens before bronze, and the second needs the Pydantic model.
