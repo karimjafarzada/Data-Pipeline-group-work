@@ -114,9 +114,12 @@ CREATE TABLE bronze.raw_records (
     validation_status  TEXT        NOT NULL DEFAULT 'pending'
                        CHECK (validation_status IN ('pending', 'valid', 'invalid')),
     validated_run_id   UUID REFERENCES ops.pipeline_runs (run_id),  -- the run whose validate() checked it
+    silver_run_id      UUID REFERENCES ops.pipeline_runs (run_id),  -- the build_silver() run that handled it
     UNIQUE (endpoint, source_id, payload_hash),
-    CHECK ((validation_status = 'pending') = (validated_run_id IS NULL))
+    CHECK ((validation_status = 'pending') = (validated_run_id IS NULL)),
+    CHECK (silver_run_id IS NULL OR validation_status = 'valid')
 );
+-- Partial index raw_records_unpromoted_idx: valid rows with silver_run_id IS NULL.
 
 -- Owner: Student 1
 CREATE TABLE ops.ingestion_checkpoint (
@@ -225,12 +228,25 @@ as a hex string. The same function is used for bronze and quarantine.
   this run's rows, so rows left by a crashed run are picked up. Each row becomes `valid` or `invalid`,
   and `validated_run_id` is set to the run that checked it, in the same update.
 - Quarantine insert: one row per broken rule, `ON CONFLICT (payload_hash, rule_name) DO NOTHING`.
-- `build_silver(run_id)`: reads **only** `bronze.promotable_records`: valid rows whose validating
-  run passed the quality gate or was released (see "Quality gate"). For each `source_id`, take the
-  newest promotable row (by `source_updated_at`, then bronze `id`) and upsert it with
-  `ON CONFLICT (id) DO UPDATE ... WHERE silver.crimes.source_updated_at <= EXCLUDED.source_updated_at`.
-  Valid rows of a run that failed the gate are **held**: no later run publishes them until a person
-  releases them. If a record's newest version is invalid or held, silver keeps its last promotable version.
+- `build_silver(run_id) -> SilverStats` (`pipeline/silver/build.py`): reads **only**
+  `bronze.promotable_records`: valid rows whose validating run passed the quality gate or was
+  released (see "Quality gate"). Valid rows of a run that failed the gate are **held**: no later run
+  publishes them until a person releases them.
+  - It reads only rows no earlier build handled (`silver_run_id IS NULL`), through a partial index,
+    so incremental builds read only new rows. At the end it sets `silver_run_id` on every row it
+    read, winners and older versions alike, all in one transaction.
+  - For each `source_id`, it takes the newest of those rows (by `source_updated_at`, then bronze `id`),
+    builds a `CrimeRecord`, `COPY`s it into a temp table, and upserts that in one statement with
+    `ON CONFLICT (id) DO UPDATE ... WHERE (silver.crimes.source_updated_at, silver.crimes.bronze_id) < (EXCLUDED.source_updated_at, EXCLUDED.bronze_id)`.
+    Strictly newer only: an older version never overwrites a newer one, and a re-run never rewrites
+    a row with itself. Every inserted or updated row gets this `run_id`.
+  - A promotable row that no longer fits `CrimeRecord` is not skipped silently: it is quarantined as
+    `model_mismatch`, its bronze row becomes `invalid`, and it counts in `SilverStats.rejected`.
+    The record's next newest candidate takes its place.
+  - If a record's newest version is invalid or held, silver keeps its last promotable version.
+  - `SilverStats`: `candidates` (rows read), `records` (distinct `source_id`s), `inserted`, `updated`,
+    `unchanged` (silver already had this version or a newer one), `rejected`, `seconds`.
+  - An advisory lock stops two builds at once (`SilverBuildError`).
 
 ### Validation rules (extend after profiling the data)
 Code: `pipeline/quality/rules.py`. Each rule gives at most one quarantine row per record;
@@ -249,7 +265,7 @@ skip values that don't parse, so one bad value is reported once. A blank string 
 | `coordinates_incomplete` | only one of `latitude` / `longitude` is present |
 | `coordinates_out_of_range` | latitude outside 41.6–42.1 or longitude outside −88.0 to −87.5 (when present) |
 | `updated_before_date` | `updated_on` is earlier than `date` |
-| `model_mismatch` | the record passes every rule above but still doesn't fit `CrimeRecord` (`pipeline/quality/model.py`), which means a rule is missing |
+| `model_mismatch` | the record passes every rule above but still doesn't fit `CrimeRecord` (`pipeline/quality/model.py`), which means a rule is missing. `build_silver()` checks again and uses the same rule if the model changed after validation |
 
 `CrimeRecord` (Pydantic) is the typed shape of a valid record, field for field the same as `silver.crimes`.
 
@@ -295,9 +311,20 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 - Every difference is written to `ops.api_schema_changes`.
 - A **new column** is logged and the run continues; bronze keeps it in `payload`.
 - A **removed or retyped column** that silver uses raises `ApiSchemaChangeError`, and the run fails
-  before anything is fetched.
+  before anything is fetched. "Used by silver" means the `CrimeRecord` source columns (each field's
+  alias, e.g. `date`, or its name): every expected column except `location`. A removed or retyped
+  column silver doesn't use is recorded and the run continues.
+- The changes are committed **before** `ApiSchemaChangeError` is raised, so a failed run shows why.
 - While paging, a record key not in the expected schema is recorded as `column_added`
-  (once per run). Missing keys are ignored, because the API omits nulls.
+  (once per run), in the same transaction as its page, with `actual_type` = its JSON type
+  prefixed with `json:` (e.g. `json:string`). Missing keys are ignored, because the API omits nulls.
+- Code: `pipeline/ingestion/schema_check.py` (`check_api_schema`, `compare_schema`,
+  `record_unexpected_keys`) and `pipeline/ingestion/expected_schema.py` (copied from the live
+  metadata on 2026-11-26: 22 columns). `SocrataClient.fetch_columns()` reads the metadata with the
+  same retries as pages.
+- A client passed to `ingest(..., client=...)` (e.g. a fake in a test or demo) must implement
+  `fetch_columns()` as well as `iter_pages()` / `iter_changed_pages()`. A fake can return
+  `expected_columns()` from `pipeline/ingestion/expected_schema.py`, which means "no API change".
 
 ### Python interfaces
 | Function | Module | Owner |
@@ -306,11 +333,11 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 | `start_run(mode, start=None, end=None) -> UUID` | `pipeline/runs.py` | Student 3 |
 | `finish_run(run_id, status, counts, error=None)` | `pipeline/runs.py` | Student 3 |
 | `ingest(run_id, mode, start=None, end=None) -> IngestStats` | `pipeline/ingestion/` | Student 1 |
-| `check_api_schema(run_id) -> list[SchemaChange]` (raises `ApiSchemaChangeError`) | `pipeline/ingestion/` | Student 1 |
+| `check_api_schema(run_id) -> list[SchemaChange]` (raises `ApiSchemaChangeError`) | `pipeline/ingestion/schema_check.py` | Student 1 |
 | `validate(run_id) -> ValidationStats` | `pipeline/quality/` | Student 1 |
 | `run_quality_gate(run_id, ingest_stats, validation_stats) -> GateResult` (raises `QualityGateError`) | `pipeline/quality/gate.py` | Student 1 |
 | `release_run(run_id, action, *, released_by, note) -> int` (raises `ReleaseError`) | `pipeline/quality/release.py` | Student 1 |
-| `build_silver(run_id)` | `pipeline/silver/` | Student 1 |
+| `build_silver(run_id) -> SilverStats` (raises `SilverBuildError`) | `pipeline/silver/build.py` | Student 1 |
 | `load_gold(run_id)` | `pipeline/gold/` | Student 2 |
 
 CLI entrypoint (scheduled by Student 3):
@@ -336,3 +363,5 @@ Real values live in `.env` (gitignored); `.env.example` lists the names with dum
   `build_silver()` (see "run_id"), and on `QualityGateError` call `finish_run(..., 'failed', ...)` with
   `rows_valid = ValidationStats.valid` and `rows_quarantined = GateResult.failed`.
 - Whether to add a CLI command for `release_run()` is still to be agreed.
+- `ingest()` raises `ApiSchemaChangeError` when the API removed or retyped a column silver uses;
+  the CLI should then call `finish_run(..., 'failed', ...)` with the error message.
