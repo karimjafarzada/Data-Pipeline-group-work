@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-bookworm
+    image: postgres:17
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-warehouse}
       POSTGRES_USER: ${POSTGRES_USER:-warehouse}
