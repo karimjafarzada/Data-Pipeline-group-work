@@ -28,7 +28,12 @@ from pipeline.ingestion.checkpoint import (
     parse_change_cursor,
     save_checkpoint,
 )
-from pipeline.ingestion.client import DATASET_ID, SocrataClient, page_last_change, page_max_id
+from pipeline.ingestion.client import (
+    DATASET_ID,
+    SocrataClient,
+    page_last_change,
+    page_max_id,
+)
 
 logger = logging.getLogger(__name__)
 
