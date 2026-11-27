@@ -19,6 +19,7 @@ dev = [
     "pytest>=8.0",
     "responses>=0.25",
     "ruff==0.17.6",
+    "pre-commit>=4,<5",
 ]
 
 [tool.setuptools.packages.find]
