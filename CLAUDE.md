@@ -322,6 +322,9 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
   `record_unexpected_keys`) and `pipeline/ingestion/expected_schema.py` (copied from the live
   metadata on 2026-11-26: 22 columns). `SocrataClient.fetch_columns()` reads the metadata with the
   same retries as pages.
+- A client passed to `ingest(..., client=...)` (e.g. a fake in a test or demo) must implement
+  `fetch_columns()` as well as `iter_pages()` / `iter_changed_pages()`. A fake can return
+  `expected_columns()` from `pipeline/ingestion/expected_schema.py`, which means "no API change".
 
 ### Python interfaces
 | Function | Module | Owner |
