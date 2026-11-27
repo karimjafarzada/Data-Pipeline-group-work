@@ -1,0 +1,210 @@
+"""Integration tests for the Gold loader and SCD2 location dimension."""
+from pathlib import Path
+
+from pipeline.gold.load import load_gold
+
+
+def insert_silver(db, run_id, *, crime_id=1001, case_number="CASE-1", description="TO VEHICLE", district="008",
+                  ward=18, community_area=66, updated="2026-11-24 15:44:55+00",
+                  arrest=False):
+    bronze_id = db.execute("""
+        INSERT INTO bronze.raw_records
+            (endpoint, source_id, payload, payload_hash, run_id)
+        VALUES ('ijzp-q8t2', %s, '{}'::jsonb, %s, %s)
+        RETURNING id
+    """, (str(crime_id), f"gold-fixture-{run_id}-{crime_id}", run_id)).fetchone()[0]
+    db.execute("""
+        INSERT INTO silver.crimes
+            (id, case_number, occurred_at, iucr, primary_type, description,
+             arrest, domestic, beat, district, ward, community_area, year,
+             source_updated_at, bronze_id, run_id)
+        VALUES (%s, %s, '2026-11-16 10:30:00-06', '1320',
+                'CRIMINAL DAMAGE', %s, %s, false, '0831', %s, %s, %s, 2026,
+                %s::timestamptz, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            description = EXCLUDED.description,
+            arrest = EXCLUDED.arrest,
+            bronze_id = EXCLUDED.bronze_id,
+            district = EXCLUDED.district,
+            ward = EXCLUDED.ward,
+            community_area = EXCLUDED.community_area,
+            source_updated_at = EXCLUDED.source_updated_at,
+            run_id = EXCLUDED.run_id
+    """, (crime_id, case_number, description, arrest, district, ward, community_area, updated, bronze_id, run_id))
+
+
+def test_load_gold_creates_star_schema_rows(db, make_run):
+    run_id = make_run()
+    insert_silver(db, run_id)
+
+    stats = load_gold(make_run(), conn=db)
+
+    assert stats.source_rows == 1
+    assert stats.facts_inserted == 1
+    assert db.execute("SELECT count(*) FROM gold.fact_crimes").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM gold.dim_date").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM gold.dim_crime_type").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM gold.dim_location WHERE is_current").fetchone()[0] == 1
+
+
+def test_load_gold_is_idempotent(db, make_run):
+    insert_silver(db, make_run())
+    load_gold(make_run(), conn=db)
+    before = db.execute("""
+        SELECT crime_id, date_key, crime_type_key, location_key, source_updated_at
+        FROM gold.fact_crimes
+    """).fetchall()
+
+    stats = load_gold(make_run(), conn=db)
+
+    after = db.execute("""
+        SELECT crime_id, date_key, crime_type_key, location_key, source_updated_at
+        FROM gold.fact_crimes
+    """).fetchall()
+    assert after == before
+    assert stats.facts_inserted == stats.facts_updated == 0
+    assert stats.facts_unchanged == 1
+    assert db.execute("SELECT count(*) FROM gold.dim_location").fetchone()[0] == 1
+
+
+def test_location_change_expires_previous_scd2_version(db, make_run):
+    first_run = make_run()
+    insert_silver(db, first_run)
+    load_gold(make_run(), conn=db)
+    second_run = make_run()
+    insert_silver(db, second_run, ward=19, updated="2026-11-25 09:00:00+00")
+
+    stats = load_gold(make_run(), conn=db)
+
+    versions = db.execute("""
+        SELECT ward, is_current
+        FROM gold.dim_location ORDER BY location_key
+    """).fetchall()
+    assert len(versions) == 2
+    assert versions[0] == (18, False)
+    assert versions[1] == (19, True)
+    assert stats.locations_expired == 1
+    assert db.execute("SELECT location_key FROM gold.fact_crimes").fetchone()[0] == db.execute(
+        "SELECT location_key FROM gold.dim_location WHERE is_current"
+    ).fetchone()[0]
+
+
+def test_newer_silver_version_updates_fact_without_duplicate(db, make_run):
+    first_run = make_run()
+    insert_silver(db, first_run)
+    load_gold(make_run(), conn=db)
+    second_run = make_run()
+    insert_silver(db, second_run, description="UPDATED", updated="2026-11-25 09:00:00+00")
+
+    stats = load_gold(make_run(), conn=db)
+
+    assert stats.facts_updated == 1
+    assert db.execute("SELECT count(*) FROM gold.fact_crimes").fetchone()[0] == 1
+    assert db.execute("SELECT case_number FROM gold.fact_crimes").fetchone()[0] == "CASE-1"
+
+
+def test_empty_silver_is_a_noop(db, make_run):
+    stats = load_gold(make_run(), conn=db)
+    assert stats.source_rows == 0
+    assert stats.facts_inserted == stats.facts_updated == stats.facts_unchanged == 0
+
+
+def test_gold_loader_preserves_connection_autocommit(db, make_run):
+    run_id = make_run()
+    db.autocommit = False
+    load_gold(run_id, conn=db)
+    assert db.autocommit is False
+
+
+def test_gold_schema_tables_exist(db):
+    for table in ("gold.dim_date", "gold.dim_crime_type", "gold.dim_location", "gold.fact_crimes"):
+        assert db.execute("SELECT to_regclass(%s) IS NOT NULL", (table,)).fetchone()[0], table
+
+
+def test_analytical_sql_runs_against_fixture_data(db, make_run):
+    insert_silver(db, make_run())
+    load_gold(make_run(), conn=db)
+    query_file = Path(__file__).resolve().parents[1] / "sql" / "gold_analytics.sql"
+    for statement in query_file.read_text(encoding="utf-8").split(";"):
+        if statement.strip():
+            db.execute(statement)
+
+
+def test_same_timestamp_higher_bronze_id_updates_fact_and_lineage(db, make_run):
+    first_silver_run = make_run()
+    insert_silver(db, first_silver_run, arrest=False)
+    load_gold(make_run(), conn=db)
+
+    corrected_silver_run = make_run()
+    insert_silver(db, corrected_silver_run, arrest=True)  # identical source_updated_at
+    corrected_bronze_id = db.execute(
+        "SELECT bronze_id FROM silver.crimes WHERE id = 1001"
+    ).fetchone()[0]
+
+    stats = load_gold(make_run(), conn=db)
+
+    fact = db.execute(
+        "SELECT arrest, bronze_id, silver_run_id FROM gold.fact_crimes WHERE crime_id = 1001"
+    ).fetchone()
+    assert stats.facts_updated == 1
+    assert fact == (True, corrected_bronze_id, corrected_silver_run)
+
+
+def test_same_timestamp_location_change_rekeys_unchanged_fact(db, make_run):
+    insert_silver(db, make_run(), crime_id=1001, ward=18)
+    load_gold(make_run(), conn=db)
+    original = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+
+    insert_silver(db, make_run(), crime_id=1002, case_number="CASE-1002", ward=19)
+    second_stats = load_gold(make_run(), conn=db)
+    updated = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+    assert updated[0] != original[0]
+    assert updated[1:] == original[1:]
+    assert second_stats.facts_updated == 1
+    assert db.execute("""
+        SELECT count(*) FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE f.crime_id = 1001
+          AND f.source_updated_at >= d.valid_from
+          AND f.source_updated_at < d.valid_to
+    """).fetchone()[0] == 1
+
+    third_stats = load_gold(make_run(), conn=db)
+    unchanged = db.execute("""
+        SELECT location_key, bronze_id, silver_run_id
+        FROM gold.fact_crimes WHERE crime_id = 1001
+    """).fetchone()
+    assert unchanged == updated
+    assert third_stats.facts_updated == third_stats.facts_inserted == 0
+    assert third_stats.facts_unchanged == 2
+
+
+def test_older_silver_version_cannot_overwrite_fact_via_location_relink(db, make_run):
+    insert_silver(db, make_run(), updated="2026-11-25 12:00:00+00", ward=18)
+    load_gold(make_run(), conn=db)
+    before = db.execute("""
+        SELECT location_key, source_updated_at, bronze_id, silver_run_id, ward
+        FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE crime_id = 1001
+    """).fetchone()
+
+    # Silver now exposes an older source timestamp with changed location data.
+    insert_silver(db, make_run(), updated="2026-11-24 12:00:00+00", ward=19)
+    stats = load_gold(make_run(), conn=db)
+    after = db.execute("""
+        SELECT location_key, source_updated_at, bronze_id, silver_run_id, ward
+        FROM gold.fact_crimes f
+        JOIN gold.dim_location d USING (location_key)
+        WHERE crime_id = 1001
+    """).fetchone()
+
+    assert after == before
+    assert stats.facts_updated == 0
+    assert stats.facts_unchanged == 1
