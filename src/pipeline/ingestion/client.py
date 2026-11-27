@@ -157,6 +157,8 @@ class SocrataClient:
             raise ValueError("max_attempts must be at least 1")
 
         self.url = f"{base_url.rstrip('/')}/resource/{DATASET_ID}.json"
+        # The dataset's metadata, including its columns (used by check_api_schema()).
+        self.metadata_url = f"{base_url.rstrip('/')}/api/views/{DATASET_ID}.json"
         self.page_size = page_size
         self.timeout = timeout  # for backfill (id-ordered) requests
         self.incremental_timeout = incremental_timeout  # for "changed since" requests
@@ -209,8 +211,22 @@ class SocrataClient:
         )
         return rows
 
+    def fetch_columns(self) -> list[Record]:
+        """The dataset's columns from the metadata endpoint, with the same retries as pages.
+
+        Each column is a dict with at least ``fieldName`` and ``dataTypeName``.
+        """
+        response = self._send(self.metadata_url, {}, self.timeout)
+        columns = _parse_columns(response)
+        logger.info("Fetched dataset metadata: %d columns", len(columns))
+        return columns
+
     def _fetch(self, params: dict[str, str], timeout: float) -> list[Record]:
         """Send the request with retries and return the parsed list of records."""
+        return _parse_records(self._send(self.url, params, timeout))
+
+    def _send(self, url: str, params: dict[str, str], timeout: float) -> requests.Response:
+        """Send a GET request to url, retrying the errors that may go away."""
         retrying = Retrying(
             retry=retry_if_exception_type(RETRYABLE_ERRORS),
             stop=stop_after_attempt(self.max_attempts),
@@ -220,8 +236,7 @@ class SocrataClient:
             # Raise the last real error (e.g. ApiServerError), not tenacity's RetryError.
             reraise=True,
         )
-        response = retrying(self._get, params, timeout)
-        return _parse_records(response)
+        return retrying(self._get, url, params, timeout)
 
     def iter_pages(
         self,
@@ -263,11 +278,9 @@ class SocrataClient:
                 return
             updated_after, after_id = _next_change_cursor(page, (updated_after, after_id))
 
-    def _get(self, params: dict[str, str], timeout: float) -> requests.Response:
+    def _get(self, url: str, params: dict[str, str], timeout: float) -> requests.Response:
         """Send one request and turn a bad status code into the matching error."""
-        response = self.session.get(
-            self.url, params=params, headers=self._headers, timeout=timeout
-        )
+        response = self.session.get(url, params=params, headers=self._headers, timeout=timeout)
         status = response.status_code
         if status == 429:
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
@@ -376,3 +389,21 @@ def _parse_records(response: requests.Response) -> list[Record]:
             f"Expected a JSON list of records, got {type(data).__name__}"
         )
     return data
+
+
+def _parse_columns(response: requests.Response) -> list[Record]:
+    """The ``columns`` list of a metadata response; each needs fieldName and dataTypeName."""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ApiResponseError("Metadata response is not valid JSON") from exc
+    columns = data.get("columns") if isinstance(data, dict) else None
+    if not isinstance(columns, list) or not all(
+        isinstance(c, dict) and isinstance(c.get("fieldName"), str)
+        and isinstance(c.get("dataTypeName"), str)
+        for c in columns
+    ):
+        raise ApiResponseError(
+            "Expected metadata with a 'columns' list of fieldName/dataTypeName entries"
+        )
+    return columns
