@@ -27,7 +27,7 @@ docker compose run --rm pipeline python -m pipeline run --mode backfill --start 
 docker compose run --rm pipeline python -m pipeline run --mode incremental
 ```
 
-The runner registers each attempt in `ops.pipeline_runs`, fetches and validates data, evaluates the quality threshold, and then calls the silver and gold loaders. End-to-end runs require the silver and gold loaders.
+The runner registers each attempt in `ops.pipeline_runs`, fetches and validates data, evaluates the quality threshold, and then calls the silver and gold loaders.
 
 ```sh
 docker compose exec db psql -U warehouse -d warehouse -c "SELECT run_id, mode, status, rows_fetched, rows_valid, rows_quarantined, error_message FROM ops.pipeline_runs ORDER BY started_at DESC LIMIT 10;"
@@ -36,7 +36,7 @@ docker compose exec db psql -U warehouse -d warehouse -c "SELECT run_id, mode, s
 The default quality threshold is 5%. Review `ops.quarantine` and `ops.quality_gate_results` before releasing a failed run's valid rows. A failed quality gate exits with code 2. Use `--action release` to allow valid rows to be promoted on the next successful run, or `--action recheck` to return them to validation. Both actions require the investigator's name and a note.
 
 ```sh
-docker compose run --rm pipeline python -m pipeline release --run-id YOUR_RUN_UUID --released-by YOUR_NAME --action recheck --note "Explain what was investigated"
+docker compose run --rm pipeline python -m pipeline release --run-id YOUR_RUN_UUID --released-by YOUR_NAME --action release --note "Explain what was investigated"
 ```
 
 ## Daily schedule
