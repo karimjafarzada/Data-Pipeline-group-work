@@ -71,8 +71,7 @@ Migration order: `ops` first, because bronze references `ops.pipeline_runs` (see
   the command again applies only new files. An advisory lock stops two runners at once.
 - Never edit a migration that has been applied anywhere; add a new file instead.
   Don't put `BEGIN` / `COMMIT` in migration files.
-- Tests apply every migration to a fresh throwaway database. Until Student 3's `pipeline_runs`
-  migration exists, they first load the test-only copy in `tests/sql/ops_pipeline_runs_stub.sql`.
+- Tests apply every migration, including `ops.pipeline_runs`, to a fresh throwaway database.
 
 ### run_id
 - A UUID created once at the start of every run by `start_run()` (owner: Student 3).

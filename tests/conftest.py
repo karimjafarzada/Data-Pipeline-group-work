@@ -11,15 +11,12 @@ but they FAIL when the CI env var is set, so a broken database can't hide in CI.
 
 import os
 import uuid
-from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg import sql
 
-from pipeline.migrate import apply_migrations, find_migrations
-
-PIPELINE_RUNS_STUB = Path(__file__).parent / "sql" / "ops_pipeline_runs_stub.sql"
+from pipeline.migrate import apply_migrations
 
 
 def _in_ci() -> bool:
@@ -88,9 +85,6 @@ def empty_db(pg_server):
 @pytest.fixture
 def db(empty_db):
     """A fresh database with ops.pipeline_runs and every migration applied."""
-    if not any("pipeline_runs" in path.name for path in find_migrations()):
-        # Student 3's migration isn't here yet, so use the CLAUDE.md definition.
-        empty_db.execute(PIPELINE_RUNS_STUB.read_text(encoding="utf-8"))
     apply_migrations(empty_db)
     return empty_db
 
