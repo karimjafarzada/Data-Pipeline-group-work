@@ -337,7 +337,7 @@ Code: `pipeline/quality/gate.py` and `pipeline/quality/release.py`.
 | `run_quality_gate(run_id, ingest_stats, validation_stats) -> GateResult` (raises `QualityGateError`) | `pipeline/quality/gate.py` | Student 1 |
 | `release_run(run_id, action, *, released_by, note) -> int` (raises `ReleaseError`) | `pipeline/quality/release.py` | Student 1 |
 | `build_silver(run_id) -> SilverStats` (raises `SilverBuildError`) | `pipeline/silver/build.py` | Student 1 |
-| `load_gold(run_id)` | `pipeline/gold/` | Student 2 |
+| `load_gold(run_id)` | `pipeline/gold/load.py` | Student 2 |
 
 CLI entrypoint (scheduled by Student 3):
 `python -m pipeline run --mode incremental`
