@@ -353,7 +353,6 @@ requests, which are slow on the API's side; backfill requests use 30 seconds).
 Real values live in `.env` (gitignored); `.env.example` lists the names with dummy values.
 
 ## Open items (owner: Student 3)
-- README does not list team members yet.
 - The CLI must call `run_quality_gate(run_id, ingest_stats, validation_stats)` between `validate()` and
   `build_silver()` (see "run_id"), and on `QualityGateError` call `finish_run(..., 'failed', ...)` with
   `rows_valid = ValidationStats.valid` and `rows_quarantined = GateResult.failed`.
