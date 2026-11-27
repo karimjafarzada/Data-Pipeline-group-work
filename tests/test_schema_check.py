@@ -8,7 +8,7 @@ from responses import matchers
 
 from pipeline.ingestion.checkpoint import load_checkpoint
 from pipeline.ingestion.client import SocrataClient
-from pipeline.ingestion.expected_schema import EXPECTED_SCHEMA
+from pipeline.ingestion.expected_schema import EXPECTED_SCHEMA, expected_columns
 from pipeline.ingestion.ingest import ingest
 from pipeline.ingestion.schema_check import (
     COLUMN_ADDED,
@@ -209,6 +209,31 @@ def test_missing_keys_are_never_reported(db, make_run, mocked_api, client):
     expect_page(mocked_api, None, [{"id": "1"}, {"id": "2", "arrest": True}])
 
     stats = ingest(make_run(), "backfill", START, END, conn=db, client=client)
+
+    assert stats.rows_inserted == 2
+    assert saved_changes(db) == []
+
+
+def test_expected_columns_match_the_expected_schema():
+    columns = expected_columns()
+
+    assert {c["fieldName"]: c["dataTypeName"] for c in columns} == EXPECTED_SCHEMA
+    columns.clear()  # a new list each call: changing one doesn't change the next
+    assert len(expected_columns()) == len(EXPECTED_SCHEMA)
+
+
+class FakeClient:
+    """A client without HTTP, like the fakes in demos: one backfill page, no API change."""
+
+    def fetch_columns(self):
+        return expected_columns()
+
+    def iter_pages(self, *, start_date, end_date, after_id):
+        yield [{"id": "1"}, {"id": "2"}]
+
+
+def test_a_fake_client_with_expected_columns_ingests_without_changes(db, make_run):
+    stats = ingest(make_run(), "backfill", START, END, conn=db, client=FakeClient())
 
     assert stats.rows_inserted == 2
     assert saved_changes(db) == []

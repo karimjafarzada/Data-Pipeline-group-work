@@ -10,14 +10,14 @@ from responses import matchers
 
 from pipeline.ingestion.checkpoint import load_checkpoint
 from pipeline.ingestion.client import SocrataClient
-from pipeline.ingestion.expected_schema import EXPECTED_SCHEMA
+from pipeline.ingestion.expected_schema import expected_columns
 from pipeline.ingestion.ingest import IngestionError, ingest
 
 BASE_URL = "https://api.test"
 URL = f"{BASE_URL}/resource/ijzp-q8t2.json"
 METADATA_URL = f"{BASE_URL}/api/views/ijzp-q8t2.json"
 # The metadata as check_api_schema() expects it: no API change.
-METADATA = {"columns": [{"fieldName": k, "dataTypeName": v} for k, v in EXPECTED_SCHEMA.items()]}
+METADATA = {"columns": expected_columns()}
 START, END = date(2024, 1, 1), date(2024, 1, 31)
 DATES = "date >= '2024-01-01T00:00:00' AND date < '2024-02-01T00:00:00'"
 T1 = "2024-01-31T14:00:00.000"

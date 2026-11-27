@@ -32,3 +32,13 @@ EXPECTED_SCHEMA: dict[str, str] = {
     "longitude": "number",
     "location": "location",
 }
+
+
+def expected_columns() -> list[dict[str, str]]:
+    """EXPECTED_SCHEMA in the shape SocrataClient.fetch_columns() returns.
+
+    For fake clients in tests and demos: ingest() calls client.fetch_columns() before
+    the first page, so a fake client needs that method too. Returning this list means
+    "the API has not changed". A new list is built each call, so callers may modify it.
+    """
+    return [{"fieldName": name, "dataTypeName": type_} for name, type_ in EXPECTED_SCHEMA.items()]
