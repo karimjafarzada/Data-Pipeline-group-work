@@ -447,3 +447,57 @@ def test_each_page_is_logged_with_after_id_and_row_count(mocked_api, client, cap
         client.fetch_page(after_id=10)
 
     assert "Fetched page after_id=10 rows=3" in caplog.text
+
+
+# --- dataset metadata -------------------------------------------------------
+
+METADATA_URL = f"{BASE_URL}/api/views/ijzp-q8t2.json"
+COLUMNS = [
+    {"fieldName": "id", "dataTypeName": "number", "name": "ID"},
+    {"fieldName": ":@computed_region_awaf_s7ux", "dataTypeName": "number"},
+]
+
+
+def test_fetch_columns_reads_the_metadata_endpoint(mocked_api, client):
+    mocked_api.get(METADATA_URL, json={"id": "ijzp-q8t2", "columns": COLUMNS})
+
+    assert client.fetch_columns() == COLUMNS
+    assert client.metadata_url == METADATA_URL
+
+
+def test_fetch_columns_retries_a_server_error(mocked_api, client, sleeps):
+    mocked_api.get(METADATA_URL, status=503)
+    mocked_api.get(METADATA_URL, json={"columns": COLUMNS})
+
+    assert client.fetch_columns() == COLUMNS
+    assert sleeps == [1]
+
+
+def test_fetch_columns_sends_the_app_token(mocked_api, make_client):
+    mocked_api.get(
+        METADATA_URL,
+        json={"columns": COLUMNS},
+        match=[matchers.header_matcher({"X-App-Token": "secret-token"})],
+    )
+    assert make_client(app_token="secret-token").fetch_columns() == COLUMNS
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"id": "ijzp-q8t2"},  # no columns
+        {"columns": "id"},  # not a list
+        {"columns": [{"fieldName": "id"}]},  # no dataTypeName
+        [COLUMNS],  # not an object
+    ],
+)
+def test_fetch_columns_rejects_metadata_without_a_column_list(mocked_api, client, body):
+    mocked_api.get(METADATA_URL, json=body)
+    with pytest.raises(ApiResponseError, match="'columns' list"):
+        client.fetch_columns()
+
+
+def test_fetch_columns_rejects_invalid_json(mocked_api, client):
+    mocked_api.get(METADATA_URL, body="<html>")
+    with pytest.raises(ApiResponseError, match="not valid JSON"):
+        client.fetch_columns()

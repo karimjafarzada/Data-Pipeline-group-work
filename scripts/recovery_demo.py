@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pipeline import __main__ as cli
 from pipeline.ingestion.bronze import CHICAGO
+from pipeline.ingestion.expected_schema import expected_columns
 from pipeline.ingestion.ingest import ingest
 
 START = date(2026, 11, 1)
@@ -29,6 +30,9 @@ class CheckpointPages:
     def __init__(self, phase):
         self.phase = phase
 
+    def fetch_columns(self):
+        return expected_columns()
+
     def iter_pages(self, *, start_date, end_date, after_id):
         assert (start_date, end_date) == (START, END)
         if self.phase == "pause":
@@ -43,6 +47,9 @@ class CheckpointPages:
 
 
 class MalformedPage:
+    def fetch_columns(self):
+        return expected_columns()
+
     def iter_pages(self, *, start_date, end_date, after_id):
         assert (start_date, end_date) == (START, END)
         assert after_id is None
