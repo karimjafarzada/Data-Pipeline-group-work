@@ -14,6 +14,7 @@ from responses import matchers
 
 from pipeline.ingestion.bronze import CHICAGO
 from pipeline.ingestion.client import SocrataClient
+from pipeline.ingestion.expected_schema import expected_columns
 from pipeline.ingestion.ingest import ingest
 from pipeline.quality.gate import THRESHOLD_ENV, QualityGateError, run_quality_gate
 from pipeline.quality.validate import validate
@@ -36,6 +37,7 @@ def ingest_result(db, make_run, batch):
     client = SocrataClient(BASE_URL, page_size=50, sleep=lambda seconds: None)
     where = "date >= '2026-11-01T00:00:00' AND date < '2026-12-01T00:00:00'"
     with responses.RequestsMock() as api:  # unregistered requests raise
+        api.get(f"{BASE_URL}/api/views/ijzp-q8t2.json", json={"columns": expected_columns()})
         api.get(
             f"{BASE_URL}/resource/ijzp-q8t2.json",
             json=batch["records"],  # 20 < page size 50, so this is the last page
