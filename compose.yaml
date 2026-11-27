@@ -15,5 +15,22 @@ services:
       timeout: 3s
       retries: 20
 
+  pipeline:
+    build: .
+    profiles: [tools]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+      POSTGRES_USER: ${POSTGRES_USER:-warehouse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      API_BASE_URL: ${API_BASE_URL:-https://data.cityofchicago.org}
+      SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN:-}
+      QUALITY_MAX_FAILURE_RATE: ${QUALITY_MAX_FAILURE_RATE:-0.05}
+      API_INCREMENTAL_TIMEOUT_SECONDS: ${API_INCREMENTAL_TIMEOUT_SECONDS:-120}
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   postgres_data:
