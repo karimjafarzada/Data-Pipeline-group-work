@@ -1,0 +1,1 @@
+"""Gold analytical warehouse layer."""

@@ -24,6 +24,7 @@ def test_migrations_create_the_tables(db):
         "ops.quality_gate_results",
         "bronze.promotable_records",
         "silver.crimes",
+        "ops.api_schema_changes",
     ):
         exists = db.execute("SELECT to_regclass(%s) IS NOT NULL", (table,)).fetchone()[0]
         assert exists, table
@@ -221,3 +222,21 @@ def test_unpromoted_rows_have_a_partial_index(db):
         "SELECT indexdef FROM pg_indexes WHERE indexname = 'raw_records_unpromoted_idx'"
     ).fetchone()[0]
     assert "WHERE ((validation_status = 'valid'::text) AND (silver_run_id IS NULL))" in definition
+
+
+# --- API schema changes ------------------------------------------------------------------
+
+
+def test_api_schema_changes_records_each_change_once_per_run(db, make_run):
+    insert = (
+        "INSERT INTO ops.api_schema_changes (run_id, endpoint, change_type, column_name,"
+        " expected_type, actual_type) VALUES (%s, 'ijzp-q8t2', %s, 'ward', 'number', 'text')"
+    )
+    run_id = make_run()
+    db.execute(insert, (run_id, "type_changed"))
+    db.execute(insert, (make_run(), "type_changed"))  # another run may record it again
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        db.execute(insert, (run_id, "type_changed"))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(insert, (run_id, "column_renamed"))

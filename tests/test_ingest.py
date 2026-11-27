@@ -10,10 +10,14 @@ from responses import matchers
 
 from pipeline.ingestion.checkpoint import load_checkpoint
 from pipeline.ingestion.client import SocrataClient
+from pipeline.ingestion.expected_schema import expected_columns
 from pipeline.ingestion.ingest import IngestionError, ingest
 
 BASE_URL = "https://api.test"
 URL = f"{BASE_URL}/resource/ijzp-q8t2.json"
+METADATA_URL = f"{BASE_URL}/api/views/ijzp-q8t2.json"
+# The metadata as check_api_schema() expects it: no API change.
+METADATA = {"columns": expected_columns()}
 START, END = date(2024, 1, 1), date(2024, 1, 31)
 DATES = "date >= '2024-01-01T00:00:00' AND date < '2024-02-01T00:00:00'"
 T1 = "2024-01-31T14:00:00.000"
@@ -24,7 +28,14 @@ T2 = "2024-02-05T09:30:00.000"
 def mocked_api():
     # Any request that isn't registered raises, so no test can reach the real API.
     with responses.RequestsMock() as rsps:
+        rsps.get(METADATA_URL, json=METADATA)  # ingest() checks the columns first
         yield rsps
+
+
+def reset_pages(mocked_api):
+    """Forget the registered pages, but keep answering the metadata request."""
+    mocked_api.reset()
+    mocked_api.get(METADATA_URL, json=METADATA)
 
 
 @pytest.fixture
@@ -87,7 +98,7 @@ def test_crash_after_page_2_resumes_from_checkpoint_without_duplicates(
     assert load_checkpoint(db, BACKFILL_KEY) == "6"
 
     # Run 2: must start after id 6 (any other request would not match and fail).
-    mocked_api.reset()
+    reset_pages(mocked_api)
     expect_backfill_page(mocked_api, 6, json=records(7, 8, 9))
     expect_backfill_page(mocked_api, 9, json=records(10))
     second_run = make_run()
@@ -136,7 +147,7 @@ def test_rerunning_a_finished_backfill_adds_nothing(db, make_run, mocked_api, cl
     expect_backfill_page(mocked_api, 3, json=records(4, 5))
     ingest(make_run(), "backfill", START, END, conn=db, client=client)
 
-    mocked_api.reset()
+    reset_pages(mocked_api)
     expect_backfill_page(mocked_api, 5, json=[])
     stats = ingest(make_run(), "backfill", START, END, conn=db, client=client)
 
@@ -148,7 +159,7 @@ def test_same_backfill_from_scratch_twice_gives_the_same_row_count(
     db, make_run, mocked_api, client
 ):
     def run_full_backfill():
-        mocked_api.reset()
+        reset_pages(mocked_api)
         expect_backfill_page(mocked_api, None, json=records(1, 2, 3))
         expect_backfill_page(mocked_api, 3, json=records(4, 5))
         return ingest(make_run(), "backfill", START, END, conn=db, client=client)
@@ -175,7 +186,7 @@ def test_incremental_picks_up_a_record_changed_after_first_load(
 
     # First incremental run has no checkpoint, so it starts at T1 (newest in bronze).
     # Record 1 was changed at T2 (e.g. an arrest was made).
-    mocked_api.reset()
+    reset_pages(mocked_api)
     changed = {"id": "1", "updated_on": T2, "arrest": True}
     expect_changes_page(mocked_api, T1, 0, records(1, 2) + [changed])
     expect_changes_page(mocked_api, T2, 1, [])
@@ -187,7 +198,7 @@ def test_incremental_picks_up_a_record_changed_after_first_load(
     assert load_checkpoint(db, "incremental:ijzp-q8t2") == f"{T2}|1"
 
     # The next incremental run continues from the checkpoint.
-    mocked_api.reset()
+    reset_pages(mocked_api)
     expect_changes_page(mocked_api, T2, 1, [])
     stats = ingest(make_run("incremental"), "incremental", conn=db, client=client)
     assert stats.pages == 0

@@ -18,7 +18,7 @@ RUN_LOCK_ID = 7_420_002
 
 
 def _publication_steps():
-    from pipeline.gold import load_gold
+    from pipeline.gold.load import load_gold
     from pipeline.silver.build import build_silver
 
     return build_silver, load_gold
